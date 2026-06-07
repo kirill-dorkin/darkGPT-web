@@ -111,7 +111,37 @@ type PaymentState = {
   message?: string;
 };
 
+type TelegramLoginAttempt = {
+  at: number;
+  userId: string;
+  origin: string;
+  botId: string;
+  callbackUrl: string;
+  status: "opened" | "callback_failed";
+  errorCode?: string;
+};
+
+type TelegramDiagnostics = {
+  ok: boolean;
+  checkedAt: string;
+  origin: string;
+  callbackUrl: string;
+  oauthUrl: string;
+  bot: {
+    id: string | null;
+    username: string | null;
+  };
+  checks: Array<{
+    id: string;
+    label: string;
+    status: "ok" | "warning" | "error";
+    detail: string;
+  }>;
+  summary: string;
+};
+
 const STORAGE_KEY = "darkgpt_web_user_id";
+const TELEGRAM_ATTEMPT_KEY = "darkgpt_telegram_login_attempt";
 
 const sectionIcons = {
   chat: MessageSquare,
@@ -189,6 +219,52 @@ function clearTelegramLoginQuery() {
   window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
+function readTelegramLoginAttempt() {
+  try {
+    const raw = window.localStorage.getItem(TELEGRAM_ATTEMPT_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Partial<TelegramLoginAttempt>;
+    if (!parsed || typeof parsed.at !== "number") {
+      return null;
+    }
+    return {
+      at: parsed.at,
+      userId: typeof parsed.userId === "string" ? parsed.userId : "",
+      origin: typeof parsed.origin === "string" ? parsed.origin : "",
+      botId: typeof parsed.botId === "string" ? parsed.botId : "",
+      callbackUrl: typeof parsed.callbackUrl === "string" ? parsed.callbackUrl : "",
+      status: parsed.status === "callback_failed" ? "callback_failed" : "opened",
+      errorCode: typeof parsed.errorCode === "string" ? parsed.errorCode : undefined,
+    } satisfies TelegramLoginAttempt;
+  } catch {
+    return null;
+  }
+}
+
+function writeTelegramLoginAttempt(attempt: TelegramLoginAttempt) {
+  window.localStorage.setItem(TELEGRAM_ATTEMPT_KEY, JSON.stringify(attempt));
+}
+
+function clearTelegramLoginAttempt() {
+  window.localStorage.removeItem(TELEGRAM_ATTEMPT_KEY);
+}
+
+function telegramErrorReason(language: Language, code?: string) {
+  const loc = locale(language);
+  if (code === "telegram_payload_invalid") {
+    return loc.telegramErrorPayload;
+  }
+  if (code === "telegram_auth_failed") {
+    return loc.telegramErrorHash;
+  }
+  if (code === "telegram_login_failed") {
+    return loc.telegramErrorStorage;
+  }
+  return loc.telegramErrorUnknown;
+}
+
 export default function ChatShell() {
   const [user, setUser] = useState<PublicUser | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -202,6 +278,9 @@ export default function ChatShell() {
   const [copied, setCopied] = useState("");
   const [payment, setPayment] = useState<PaymentState | null>(null);
   const [selectedTier, setSelectedTier] = useState<ModelTier>("standard");
+  const [telegramAttempt, setTelegramAttempt] = useState<TelegramLoginAttempt | null>(null);
+  const [telegramDiagnostics, setTelegramDiagnostics] = useState<TelegramDiagnostics | null>(null);
+  const [isCheckingTelegram, setIsCheckingTelegram] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const language: Language = user?.language || "ru";
@@ -235,8 +314,11 @@ export default function ChatShell() {
       const referralId = params.get("ref") || params.get("start") || "";
       const telegramLogin = params.get("telegramLogin");
       const telegramUserId = params.get("telegramUserId");
+      const telegramError = params.get("telegramError") || "";
       const returnedUserId = isValidUserId(telegramUserId) ? telegramUserId : "";
       const storedUserId = returnedUserId || window.localStorage.getItem(STORAGE_KEY);
+      const existingTelegramAttempt = readTelegramLoginAttempt();
+      setTelegramAttempt(existingTelegramAttempt);
 
       try {
         const data = await postJson<ApiEnvelope>("/api/session", {
@@ -254,11 +336,25 @@ export default function ChatShell() {
           setMessages(makeInitialMessages(data.user.language));
         }
         if (telegramLogin === "success") {
+          clearTelegramLoginAttempt();
+          setTelegramAttempt(null);
           setNotice(t(data.user?.language || "ru", "telegramLoggedIn"));
           setActiveSection(data.user?.languageSelected ? "profile" : "language");
           clearTelegramLoginQuery();
         } else if (telegramLogin === "failed") {
-          setNotice(t(data.user?.language || "ru", "telegramAuthFailed"));
+          const nextLanguage = data.user?.language || "ru";
+          const failedAttempt: TelegramLoginAttempt = {
+            at: existingTelegramAttempt?.at || Date.now(),
+            userId: existingTelegramAttempt?.userId || storedUserId || "",
+            origin: existingTelegramAttempt?.origin || data.config?.origin || window.location.origin,
+            botId: existingTelegramAttempt?.botId || data.config?.telegramBotId || "",
+            callbackUrl: existingTelegramAttempt?.callbackUrl || "",
+            status: "callback_failed",
+            errorCode: telegramError || "telegram_unknown",
+          };
+          writeTelegramLoginAttempt(failedAttempt);
+          setTelegramAttempt(failedAttempt);
+          setNotice(`${t(nextLanguage, "telegramAuthFailed")} ${telegramErrorReason(nextLanguage, telegramError)}`);
           clearTelegramLoginQuery();
         }
       } catch (error) {
@@ -407,6 +503,36 @@ export default function ChatShell() {
     setInput("");
   }
 
+  function handleTelegramAttempt(attempt: TelegramLoginAttempt) {
+    writeTelegramLoginAttempt(attempt);
+    setTelegramAttempt(attempt);
+    setTelegramDiagnostics(null);
+  }
+
+  async function checkTelegramDiagnostics() {
+    setIsCheckingTelegram(true);
+    setNotice("");
+    try {
+      const params = new URLSearchParams({ language });
+      if (user?.userId) {
+        params.set("currentUserId", user.userId);
+      }
+      const response = await fetch(`/api/auth/telegram/diagnostics?${params.toString()}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+      const data = (await response.json().catch(() => ({}))) as Partial<TelegramDiagnostics> & { error?: string };
+      if (!response.ok || !data.checks) {
+        throw new Error(data.error || loc.telegramDiagnosticsUnavailable);
+      }
+      setTelegramDiagnostics(data as TelegramDiagnostics);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : loc.telegramDiagnosticsUnavailable);
+    } finally {
+      setIsCheckingTelegram(false);
+    }
+  }
+
   async function copyText(text: string, label: string) {
     await navigator.clipboard.writeText(text);
     setCopied(label);
@@ -531,6 +657,14 @@ export default function ChatShell() {
               origin={origin}
               currentUserId={user?.userId || ""}
               language={language}
+              onAttempt={handleTelegramAttempt}
+            />
+            <TelegramDiagnosticsPanel
+              language={language}
+              attempt={telegramAttempt}
+              diagnostics={telegramDiagnostics}
+              isChecking={isCheckingTelegram}
+              onCheck={() => void checkTelegramDiagnostics()}
             />
           </div>
           {notice ? <div className="mt-4 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">{notice}</div> : null}
@@ -699,6 +833,11 @@ export default function ChatShell() {
               language={language}
               telegramBotId={config?.telegramBotId || ""}
               origin={origin}
+              telegramAttempt={telegramAttempt}
+              telegramDiagnostics={telegramDiagnostics}
+              isCheckingTelegram={isCheckingTelegram}
+              onTelegramAttempt={handleTelegramAttempt}
+              onCheckTelegram={() => void checkTelegramDiagnostics()}
             />
           ) : null}
 
@@ -744,11 +883,13 @@ function TelegramLoginButton({
   origin,
   currentUserId,
   language,
+  onAttempt,
 }: {
   botId: string;
   origin: string;
   currentUserId: string;
   language: Language;
+  onAttempt: (attempt: TelegramLoginAttempt) => void;
 }) {
   const loc = locale(language);
   if (!botId || !origin) {
@@ -772,11 +913,116 @@ function TelegramLoginButton({
   return (
     <a
       href={telegramUrl.toString()}
+      onClick={() =>
+        onAttempt({
+          at: Date.now(),
+          userId: currentUserId,
+          origin,
+          botId,
+          callbackUrl: returnTo.toString(),
+          status: "opened",
+        })
+      }
       className="flex h-11 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
     >
       <Send size={17} />
       {loc.telegramLogin}
     </a>
+  );
+}
+
+function TelegramDiagnosticsPanel({
+  language,
+  attempt,
+  diagnostics,
+  isChecking,
+  onCheck,
+}: {
+  language: Language;
+  attempt: TelegramLoginAttempt | null;
+  diagnostics: TelegramDiagnostics | null;
+  isChecking: boolean;
+  onCheck: () => void;
+}) {
+  const loc = locale(language);
+  const attemptTime = attempt ? new Date(attempt.at).toLocaleString(language === "ru" ? "ru-RU" : "en-US") : "";
+  const attemptMessage =
+    attempt?.status === "callback_failed"
+      ? t(language, "telegramCallbackFailed", { reason: telegramErrorReason(language, attempt.errorCode) })
+      : loc.telegramCallbackWaiting;
+
+  return (
+    <div className="mt-3 rounded-md border border-line bg-panel p-3 text-sm">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="font-semibold text-slate-800">{loc.telegramDiagnostics}</div>
+        <button
+          type="button"
+          onClick={onCheck}
+          disabled={isChecking}
+          className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-white px-3 text-sm font-semibold text-slate-800 transition hover:border-signal disabled:opacity-60"
+        >
+          {isChecking ? <Loader2 size={15} className="animate-spin" /> : <RefreshCcw size={15} />}
+          {isChecking ? loc.telegramChecking : loc.telegramCheck}
+        </button>
+      </div>
+
+      <div
+        className={clsx(
+          "mt-3 rounded-md border px-3 py-2",
+          attempt?.status === "callback_failed"
+            ? "border-red-200 bg-red-50 text-red-800"
+            : attempt
+              ? "border-orange-200 bg-orange-50 text-orange-800"
+              : "border-line bg-white text-slate-600",
+        )}
+      >
+        <div className="font-medium">{attempt ? `${loc.telegramLastAttempt}: ${attemptTime}` : loc.telegramNoAttempt}</div>
+        {attempt ? <div className="mt-1 leading-relaxed">{attemptMessage}</div> : null}
+      </div>
+
+      {diagnostics ? (
+        <div className="mt-3 space-y-2">
+          <div
+            className={clsx(
+              "rounded-md border px-3 py-2 font-medium",
+              diagnostics.ok ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-red-200 bg-red-50 text-red-800",
+            )}
+          >
+            {diagnostics.ok ? loc.telegramDiagnosticsOk : loc.telegramDiagnosticsProblem}
+          </div>
+          {diagnostics.checks.map((item) => (
+            <div key={item.id} className="flex gap-2 rounded-md border border-line bg-white px-3 py-2">
+              <div
+                className={clsx(
+                  "mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full",
+                  item.status === "ok"
+                    ? "bg-emerald-100 text-emerald-700"
+                    : item.status === "warning"
+                      ? "bg-orange-100 text-orange-700"
+                      : "bg-red-100 text-red-700",
+                )}
+              >
+                {item.status === "ok" ? <Check size={13} /> : <X size={13} />}
+              </div>
+              <div className="min-w-0">
+                <div className="font-medium text-slate-800">{item.label}</div>
+                <div className="mt-0.5 break-words text-slate-600">{item.detail}</div>
+              </div>
+            </div>
+          ))}
+          <div className="rounded-md border border-line bg-white px-3 py-2 text-slate-700">{diagnostics.summary}</div>
+          <a
+            href={diagnostics.oauthUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-white px-3 text-sm font-semibold text-slate-800 transition hover:border-signal"
+          >
+            <Send size={15} />
+            {loc.telegramOpenOAuth}
+          </a>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1154,11 +1400,21 @@ function ProfileView({
   language,
   telegramBotId,
   origin,
+  telegramAttempt,
+  telegramDiagnostics,
+  isCheckingTelegram,
+  onTelegramAttempt,
+  onCheckTelegram,
 }: {
   user: PublicUser;
   language: Language;
   telegramBotId: string;
   origin: string;
+  telegramAttempt: TelegramLoginAttempt | null;
+  telegramDiagnostics: TelegramDiagnostics | null;
+  isCheckingTelegram: boolean;
+  onTelegramAttempt: (attempt: TelegramLoginAttempt) => void;
+  onCheckTelegram: () => void;
 }) {
   const loc = locale(language);
   const langName = language === "ru" ? loc.russian : loc.english;
@@ -1184,7 +1440,20 @@ function ProfileView({
             {loc.telegramLogin}
           </div>
           <p className="mb-3 text-sm text-slate-700">{loc.telegramLoginHint}</p>
-          <TelegramLoginButton botId={telegramBotId} origin={origin} currentUserId={user.userId} language={language} />
+          <TelegramLoginButton
+            botId={telegramBotId}
+            origin={origin}
+            currentUserId={user.userId}
+            language={language}
+            onAttempt={onTelegramAttempt}
+          />
+          <TelegramDiagnosticsPanel
+            language={language}
+            attempt={telegramAttempt}
+            diagnostics={telegramDiagnostics}
+            isChecking={isCheckingTelegram}
+            onCheck={onCheckTelegram}
+          />
         </section>
       </div>
     </div>

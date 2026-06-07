@@ -19,6 +19,10 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const authData = normalizeTelegramAuthData(Object.fromEntries(url.searchParams.entries()));
   if (!authData) {
+    console.warn("[telegram-auth] callback invalid payload", {
+      origin: getOrigin(request),
+      keys: Array.from(url.searchParams.keys()).sort(),
+    });
     return redirectToApp(request, {
       telegramLogin: "failed",
       telegramError: "telegram_payload_invalid",
@@ -27,6 +31,10 @@ export async function GET(request: Request) {
 
   const verification = verifyTelegramAuthData(authData, process.env.BOT_TOKEN || "");
   if (!verification.ok) {
+    console.warn("[telegram-auth] callback verification failed", {
+      reason: verification.reason,
+      telegramUserId: authData.id,
+    });
     return redirectToApp(request, {
       telegramLogin: "failed",
       telegramError: "telegram_auth_failed",
@@ -46,11 +54,21 @@ export async function GET(request: Request) {
       await updateUserLanguage(telegramUserId, currentUser.language);
     }
 
+    console.info("[telegram-auth] callback success", {
+      telegramUserId,
+      currentUserId: currentUserId || null,
+      hasUsername: Boolean(authData.username),
+    });
     return redirectToApp(request, {
       telegramLogin: "success",
       telegramUserId,
     });
-  } catch {
+  } catch (error) {
+    console.error("[telegram-auth] callback storage failure", {
+      telegramUserId,
+      currentUserId: currentUserId || null,
+      error: error instanceof Error ? error.message : "unknown",
+    });
     return redirectToApp(request, {
       telegramLogin: "failed",
       telegramError: "telegram_login_failed",
