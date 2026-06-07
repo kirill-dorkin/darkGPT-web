@@ -43,6 +43,9 @@ GEMINI_API_KEY=...
 GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 GEMINI_REASONING_EFFORT=none
 GEMINI_FALLBACK_MODELS=gemini-2.5-flash,gemini-2.5-pro
+AI_FALLBACK_PROVIDERS=openrouter
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=openai/gpt-oss-120b:free
 AI_TIMEOUT_SECONDS=45
 AI_MAX_OUTPUT_TOKENS=700
 ```
@@ -82,6 +85,7 @@ CRYPTO_PAY_BASE_URL=https://testnet-pay.crypt.bot/api
 - Free daily requests reset automatically by date.
 - Paid invoices are checked through `/api/payments/check` and processed idempotently.
 - Gemini requests can use tier selection and automatic fallback models when a model hits rate limits.
+- If all Gemini attempts fail with retryable provider errors, the web backend falls back to OpenRouter when `OPENROUTER_API_KEY` or `LLM_API_KEY` is configured.
 
 ## Git Remote
 

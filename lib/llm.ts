@@ -23,6 +23,11 @@ type ProviderConfig = {
 
 type CompletionResult = {
   text: string;
+  provider: string;
+  model: string;
+};
+
+type ProviderAttempt = ProviderConfig & {
   model: string;
 };
 
@@ -130,6 +135,95 @@ function getProviderConfig(tier?: string | null): ProviderConfig {
   };
 }
 
+function configForProvider(provider: string, tier: string, maxTokens: number): ProviderConfig {
+  const normalizedProvider = provider.toLowerCase();
+  const model = defaultModelForProvider(normalizedProvider, tier);
+  const fallbackModels = fallbackModelsForProvider(normalizedProvider, tier, model);
+
+  return {
+    provider: normalizedProvider,
+    baseUrl: openAiBaseUrlForProvider(normalizedProvider, env(`AI_${tier.toUpperCase()}_RUNPOD_ENDPOINT_ID`) || env("RUNPOD_ENDPOINT_ID")).replace(/\/+$/, ""),
+    apiKey: apiKeyForProvider(normalizedProvider),
+    model,
+    fallbackModels,
+    timeoutMs: intEnv("AI_TIMEOUT_SECONDS", 45) * 1000,
+    maxTokens,
+    reasoningEffort: env("GEMINI_REASONING_EFFORT"),
+    title: env("OPENROUTER_TITLE", "DarkGPT Web"),
+    referer: env("OPENROUTER_HTTP_REFERER"),
+    tier,
+    runpodEndpointId: env(`AI_${tier.toUpperCase()}_RUNPOD_ENDPOINT_ID`) || env("RUNPOD_ENDPOINT_ID"),
+    replicateVersion: env(`AI_${tier.toUpperCase()}_REPLICATE_VERSION`) || env("REPLICATE_VERSION"),
+  };
+}
+
+function defaultModelForProvider(provider: string, tier: string) {
+  if (provider === "gemini") {
+    const defaults: Record<string, string> = {
+      lite: "gemini-2.5-flash-lite",
+      standard: "gemini-2.5-flash",
+      reasoning: "gemini-2.5-pro",
+    };
+    return env("GEMINI_MODEL", defaults[tier] || defaults.standard);
+  }
+  if (provider === "openrouter") {
+    return env("OPENROUTER_MODEL") || env("LLM_MODEL", "openai/gpt-oss-120b:free");
+  }
+  if (provider === "runpod") {
+    return env(`AI_${tier.toUpperCase()}_MODEL`) || env("RUNPOD_MODEL", tier);
+  }
+  if (provider === "replicate") {
+    return env(`AI_${tier.toUpperCase()}_MODEL`) || env("REPLICATE_MODEL", tier);
+  }
+  return tier;
+}
+
+function fallbackModelsForProvider(provider: string, tier: string, model: string) {
+  const configured =
+    provider === "gemini"
+      ? env(`AI_${tier.toUpperCase()}_FALLBACK_MODELS`) || env("GEMINI_FALLBACK_MODELS")
+      : provider === "openrouter"
+        ? env("OPENROUTER_FALLBACK_MODELS") || env("LLM_FALLBACK_MODELS")
+        : "";
+
+  const models = configured
+    .split(",")
+    .map((value) => value.trim())
+    .filter((value) => value && value !== model);
+
+  if (models.length || provider !== "gemini") {
+    return models;
+  }
+
+  return defaultFallbackModels(provider, tier, model);
+}
+
+function fallbackProvidersForConfig(config: ProviderConfig) {
+  const configured = env(`AI_${config.tier.toUpperCase()}_FALLBACK_PROVIDERS`) || env("AI_FALLBACK_PROVIDERS");
+  const providers = configured
+    ? configured.split(",").map((value) => value.trim().toLowerCase())
+    : config.provider === "gemini"
+      ? ["openrouter"]
+      : [];
+
+  return providers.filter((provider, index) => provider && provider !== config.provider && providers.indexOf(provider) === index);
+}
+
+function attemptsForConfig(config: ProviderConfig): ProviderAttempt[] {
+  const configs = [
+    config,
+    ...fallbackProvidersForConfig(config).map((provider) => configForProvider(provider, config.tier, config.maxTokens)),
+  ];
+
+  return configs.flatMap((providerConfig) => {
+    const models = [providerConfig.model, ...providerConfig.fallbackModels.filter((model) => model !== providerConfig.model)];
+    return models.map((model) => ({
+      ...providerConfig,
+      model,
+    }));
+  });
+}
+
 function defaultFallbackModels(provider: string, tier: string, model: string) {
   if (provider !== "gemini") {
     return [];
@@ -194,10 +288,7 @@ class LLMRequestError extends Error {
 }
 
 function isRetryableProviderError(error: unknown) {
-  if (!(error instanceof LLMRequestError)) {
-    return false;
-  }
-  return error.status === 408 || error.status === 409 || error.status === 429 || error.status >= 500;
+  return error instanceof LLMRequestError;
 }
 
 function demoResponse(userMessage: string) {
@@ -226,12 +317,12 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs: number) {
   }
 }
 
-async function requestOpenAiCompatibleModel(config: ProviderConfig, userMessage: string, model: string) {
-  if (!config.apiKey) {
-    throw new Error(`${config.provider} API key is not configured`);
+async function requestOpenAiCompatibleModel(attempt: ProviderAttempt, userMessage: string) {
+  if (!attempt.apiKey) {
+    throw new LLMRequestError(`${attempt.provider} API key is not configured`, 0, "provider_not_configured");
   }
-  if (!config.baseUrl) {
-    throw new Error(`${config.provider} base URL is not configured`);
+  if (!attempt.baseUrl) {
+    throw new LLMRequestError(`${attempt.provider} base URL is not configured`, 0, "provider_not_configured");
   }
 
   const messages: ChatMessage[] = [
@@ -241,37 +332,37 @@ async function requestOpenAiCompatibleModel(config: ProviderConfig, userMessage:
 
   const payload: Record<string, unknown> = {
     messages,
-    max_tokens: config.maxTokens,
+    max_tokens: attempt.maxTokens,
     temperature: 0.7,
   };
 
-  payload.model = model;
+  payload.model = attempt.model;
 
-  if (config.provider === "gemini" && config.reasoningEffort) {
-    payload.reasoning_effort = config.reasoningEffort;
+  if (attempt.provider === "gemini" && attempt.reasoningEffort) {
+    payload.reasoning_effort = attempt.reasoningEffort;
   }
 
   const headers: Record<string, string> = {
-    Authorization: `Bearer ${config.apiKey}`,
+    Authorization: `Bearer ${attempt.apiKey}`,
     "Content-Type": "application/json",
     Accept: "application/json",
   };
 
-  if (config.provider === "openrouter") {
-    headers["X-Title"] = config.title;
-    if (config.referer) {
-      headers["HTTP-Referer"] = config.referer;
+  if (attempt.provider === "openrouter") {
+    headers["X-Title"] = attempt.title;
+    if (attempt.referer) {
+      headers["HTTP-Referer"] = attempt.referer;
     }
   }
 
   const { response, data } = await fetchJson(
-    `${config.baseUrl}/chat/completions`,
+    `${attempt.baseUrl}/chat/completions`,
     {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
     },
-    config.timeoutMs,
+    attempt.timeoutMs,
   );
 
   if (!response.ok || data.error) {
@@ -286,14 +377,17 @@ async function requestOpenAiCompatibleModel(config: ProviderConfig, userMessage:
 }
 
 async function createOpenAiCompatibleCompletion(config: ProviderConfig, userMessage: string): Promise<CompletionResult> {
-  const models = [config.model, ...config.fallbackModels.filter((model) => model !== config.model)];
+  const attempts = attemptsForConfig(config);
   let lastError: unknown = null;
 
-  for (const model of models) {
+  for (const attempt of attempts) {
     try {
-      const text = await requestOpenAiCompatibleModel(config, userMessage, model);
-      return { text, model };
+      const text = await requestOpenAiCompatibleModel(attempt, userMessage);
+      return { text, provider: attempt.provider, model: attempt.model };
     } catch (error) {
+      if (error instanceof LLMRequestError && error.code === "provider_not_configured" && lastError) {
+        continue;
+      }
       lastError = error;
       if (!isRetryableProviderError(error)) {
         throw error;
@@ -342,7 +436,7 @@ async function createReplicateCompletion(config: ProviderConfig, userMessage: st
   if (!text) {
     throw new Error("Replicate returned empty response");
   }
-  return { text, model: config.model };
+  return { text, provider: config.provider, model: config.model };
 }
 
 export async function createChatCompletion(userMessage: string, tier?: string | null) {
@@ -364,7 +458,7 @@ export async function createChatCompletion(userMessage: string, tier?: string | 
 
   return {
     text: result.text,
-    provider: config.provider,
+    provider: result.provider,
     model: result.model,
     tier: config.tier,
   };
