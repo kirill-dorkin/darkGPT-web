@@ -1,3 +1,5 @@
+import { getModelProfile } from "@/lib/model-router";
+
 type ChatMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -14,6 +16,9 @@ type ProviderConfig = {
   reasoningEffort: string;
   title: string;
   referer: string;
+  tier: string;
+  runpodEndpointId: string;
+  replicateVersion: string;
 };
 
 type ChatCompletionResponse = {
@@ -24,11 +29,19 @@ type ChatCompletionResponse = {
     };
     text?: string;
   }>;
-  error?: {
-    message?: string;
-    type?: string;
-    code?: string | number;
-  } | string;
+  output?: unknown;
+  text?: string;
+  response?: string;
+  answer?: string;
+  generated_text?: string;
+  error?:
+    | {
+        message?: string;
+        type?: string;
+        code?: string | number;
+      }
+    | string;
+  status?: string;
 };
 
 const DEFAULT_SYSTEM_PROMPT = [
@@ -47,64 +60,133 @@ function intEnv(name: string, fallback: number) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
-function getProviderConfig(): ProviderConfig {
-  const provider = (env("LLM_PROVIDER") || env("AI_PROVIDER", "gemini")).toLowerCase();
-  const isOpenRouter = provider === "openrouter";
+function openAiBaseUrlForProvider(provider: string, runpodEndpointId: string) {
+  if (env("LLM_BASE_URL")) {
+    return env("LLM_BASE_URL");
+  }
+  if (provider === "openrouter") {
+    return env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
+  }
+  if (provider === "runpod") {
+    return (
+      env("RUNPOD_OPENAI_BASE_URL") ||
+      (runpodEndpointId ? `https://api.runpod.ai/v2/${runpodEndpointId}/openai/v1` : "")
+    );
+  }
+  return env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai");
+}
 
-  const baseUrl =
-    env("LLM_BASE_URL") ||
-    env("OPENROUTER_BASE_URL") ||
-    env("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai");
+function apiKeyForProvider(provider: string) {
+  if (env("LLM_API_KEY")) {
+    return env("LLM_API_KEY");
+  }
+  if (provider === "openrouter") {
+    return env("OPENROUTER_API_KEY");
+  }
+  if (provider === "runpod") {
+    return env("RUNPOD_API_KEY");
+  }
+  if (provider === "replicate") {
+    return env("REPLICATE_API_TOKEN");
+  }
+  return env("GEMINI_API_KEY");
+}
 
-  const apiKey =
-    env("LLM_API_KEY") ||
-    env("OPENROUTER_API_KEY") ||
-    env("GEMINI_API_KEY");
-
-  const model =
-    env("LLM_MODEL") ||
-    env("OPENROUTER_MODEL") ||
-    env("AI_STANDARD_MODEL") ||
-    env("GEMINI_MODEL", "gemini-2.5-flash-lite");
-
+function getProviderConfig(tier?: string | null): ProviderConfig {
+  const profile = getModelProfile(tier);
+  const provider = profile.provider.toLowerCase();
   const fallbackModels = (env("LLM_FALLBACK_MODELS") || env("OPENROUTER_FALLBACK_MODELS"))
     .split(",")
     .map((value) => value.trim())
-    .filter((value) => value && value !== model);
+    .filter((value) => value && value !== profile.model);
 
   return {
     provider,
-    baseUrl: baseUrl.replace(/\/+$/, ""),
-    apiKey,
-    model,
-    fallbackModels: isOpenRouter ? fallbackModels : [],
+    baseUrl: openAiBaseUrlForProvider(provider, profile.runpodEndpointId).replace(/\/+$/, ""),
+    apiKey: apiKeyForProvider(provider),
+    model: profile.model,
+    fallbackModels: provider === "openrouter" ? fallbackModels : [],
     timeoutMs: intEnv("AI_TIMEOUT_SECONDS", 45) * 1000,
-    maxTokens: intEnv("AI_MAX_OUTPUT_TOKENS", 700),
+    maxTokens: profile.maxTokens,
     reasoningEffort: env("GEMINI_REASONING_EFFORT"),
     title: env("OPENROUTER_TITLE", "DarkGPT Web"),
     referer: env("OPENROUTER_HTTP_REFERER"),
+    tier: profile.tier,
+    runpodEndpointId: profile.runpodEndpointId,
+    replicateVersion: profile.replicateVersion,
   };
 }
 
-function extractText(data: ChatCompletionResponse) {
-  const choice = data.choices?.[0];
-  const content = choice?.message?.content ?? choice?.text ?? "";
-  if (content.trim()) {
-    return content.trim();
+function extractText(value: unknown): string {
+  if (value === null || value === undefined) {
+    return "";
   }
-  const refusal = choice?.message?.refusal ?? "";
-  return refusal.trim();
+  if (typeof value === "string") {
+    return value.trim();
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => extractText(item)).join("").trim();
+  }
+  if (typeof value === "object") {
+    const data = value as ChatCompletionResponse;
+    for (const key of ["text", "response", "answer", "generated_text"] as const) {
+      const text = extractText(data[key]);
+      if (text) {
+        return text;
+      }
+    }
+
+    const choice = data.choices?.[0];
+    const content = choice?.message?.content ?? choice?.message?.refusal ?? choice?.text ?? "";
+    if (content.trim()) {
+      return content.trim();
+    }
+
+    return extractText(data.output);
+  }
+  return "";
 }
 
-export async function createChatCompletion(userMessage: string) {
-  const config = getProviderConfig();
+function errorMessage(data: ChatCompletionResponse, fallback: string) {
+  if (typeof data.error === "string") {
+    return data.error;
+  }
+  return data.error?.message || fallback;
+}
 
+function demoResponse(userMessage: string) {
+  return [
+    "Demo answer for:",
+    "",
+    userMessage,
+    "",
+    "Configure AI_PROVIDER=gemini, AI_PROVIDER=openrouter, AI_PROVIDER=runpod, or AI_PROVIDER=replicate to use remote inference.",
+  ].join("\n");
+}
+
+async function fetchJson(url: string, init: RequestInit, timeoutMs: number) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+    const data = (await response.json().catch(() => ({}))) as ChatCompletionResponse;
+    return { response, data };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function createOpenAiCompatibleCompletion(config: ProviderConfig, userMessage: string) {
   if (!config.apiKey) {
     throw new Error(`${config.provider} API key is not configured`);
   }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), config.timeoutMs);
+  if (!config.baseUrl) {
+    throw new Error(`${config.provider} base URL is not configured`);
+  }
 
   const messages: ChatMessage[] = [
     { role: "system", content: DEFAULT_SYSTEM_PROMPT },
@@ -140,31 +222,89 @@ export async function createChatCompletion(userMessage: string) {
     }
   }
 
-  try {
-    const response = await fetch(`${config.baseUrl}/chat/completions`, {
+  const { response, data } = await fetchJson(
+    `${config.baseUrl}/chat/completions`,
+    {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+    },
+    config.timeoutMs,
+  );
 
-    const data = (await response.json()) as ChatCompletionResponse;
-    if (!response.ok || data.error) {
-      const error = typeof data.error === "string" ? data.error : data.error?.message;
-      throw new Error(error || `LLM request failed with ${response.status}`);
-    }
+  if (!response.ok || data.error) {
+    throw new Error(errorMessage(data, `LLM request failed with ${response.status}`));
+  }
 
-    const text = extractText(data);
-    if (!text) {
-      throw new Error("LLM returned empty response");
-    }
+  const text = extractText(data);
+  if (!text) {
+    throw new Error("LLM returned empty response");
+  }
+  return text;
+}
 
+async function createReplicateCompletion(config: ProviderConfig, userMessage: string) {
+  if (!config.apiKey || !config.replicateVersion) {
+    throw new Error("Replicate is not configured");
+  }
+
+  const { response, data } = await fetchJson(
+    "https://api.replicate.com/v1/predictions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        "Content-Type": "application/json",
+        Prefer: `wait=${Math.ceil(config.timeoutMs / 1000)}`,
+        "Cancel-After": `${Math.ceil(config.timeoutMs / 1000)}s`,
+      },
+      body: JSON.stringify({
+        version: config.replicateVersion,
+        input: {
+          prompt: `${DEFAULT_SYSTEM_PROMPT}\n\n${userMessage}`,
+          max_new_tokens: config.maxTokens,
+          model: config.model,
+        },
+      }),
+    },
+    config.timeoutMs + 5000,
+  );
+
+  if (!response.ok || data.error) {
+    throw new Error(errorMessage(data, `Replicate request failed with ${response.status}`));
+  }
+  if (data.status && !["successful", "succeeded", "processing", "starting"].includes(data.status)) {
+    throw new Error("Replicate request failed");
+  }
+
+  const text = extractText(data.output || data);
+  if (!text) {
+    throw new Error("Replicate returned empty response");
+  }
+  return text;
+}
+
+export async function createChatCompletion(userMessage: string, tier?: string | null) {
+  const config = getProviderConfig(tier);
+
+  if (config.provider === "demo") {
     return {
-      text,
+      text: demoResponse(userMessage),
       provider: config.provider,
       model: config.model,
+      tier: config.tier,
     };
-  } finally {
-    clearTimeout(timeout);
   }
+
+  const text =
+    config.provider === "replicate"
+      ? await createReplicateCompletion(config, userMessage)
+      : await createOpenAiCompatibleCompletion(config, userMessage);
+
+  return {
+    text,
+    provider: config.provider,
+    model: config.model,
+    tier: config.tier,
+  };
 }

@@ -1,6 +1,6 @@
 # DarkGPT Web
 
-Standalone Next.js web interface for DarkGPT.
+Standalone Next.js web interface for DarkGPT. The web app mirrors the Telegram bot flow: RU/EN language selection, 3 free requests per day, credit balance, Crypto Bot top-ups, referrals, profile, and support links.
 
 ## Stack
 
@@ -8,6 +8,8 @@ Standalone Next.js web interface for DarkGPT.
 - React
 - Tailwind CSS
 - OpenAI-compatible chat completions API
+- PostgreSQL/Neon storage shared with the bot schema
+- Crypto Bot Crypto Pay invoices
 
 ## Local Setup
 
@@ -19,9 +21,12 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+`DATABASE_URL` is required for runtime API routes. Use the same pooled PostgreSQL/Neon database as the bot, or a compatible PostgreSQL database. The web app creates missing tables with the bot-compatible schema if they do not exist.
+
 ## Gemini Env
 
 ```env
+DATABASE_URL=postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require
 AI_PROVIDER=gemini
 AI_STANDARD_MODEL=gemini-2.5-flash-lite
 GEMINI_API_KEY=...
@@ -43,6 +48,27 @@ LLM_MODEL=openai/gpt-oss-120b:free
 LLM_FALLBACK_MODELS=
 OPENROUTER_TITLE=DarkGPT Web
 ```
+
+## Payments
+
+```env
+CRYPTO_PAY_API_KEY=...
+CRYPTO_PAY_BASE_URL=https://pay.crypt.bot/api
+```
+
+For Crypto Bot testnet:
+
+```env
+CRYPTO_PAY_BASE_URL=https://testnet-pay.crypt.bot/api
+```
+
+## Runtime Flow
+
+- Browser stores an anonymous web account ID in `localStorage`.
+- Referral links use `?ref=<user_id>`.
+- Credits are charged only after a successful AI response.
+- Free daily requests reset automatically by date.
+- Paid invoices are checked through `/api/payments/check` and processed idempotently.
 
 ## Git Remote
 

@@ -3,19 +3,55 @@
 import clsx from "clsx";
 import {
   Bot,
-  CheckCircle2,
+  Check,
   Copy,
+  CreditCard,
+  HelpCircle,
+  Languages,
   Loader2,
+  Menu,
+  MessageSquare,
   PanelLeft,
+  RefreshCcw,
   RotateCcw,
   Send,
-  Sparkles,
+  Share2,
   User,
+  Users,
+  Wallet,
+  X,
   Zap,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { FormEvent, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { locale, t } from "@/lib/locales";
+
+type Language = "ru" | "en";
+type Section = "chat" | "balance" | "referral" | "profile" | "language" | "help";
+
+type PublicUser = {
+  userId: string;
+  language: Language | null;
+  languageSelected: boolean;
+  freeUsedToday: number;
+  freeLeft: number;
+  freeTotal: number;
+  balance: number;
+  totalPurchased: number;
+  totalSpent: number;
+  referralCount: number;
+  paidReferralCount: number;
+  referredBy: string | null;
+};
+
+type AppConfig = {
+  freeTotal: number;
+  requestCost: number;
+  packages: Record<string, { price: number; credits: number }>;
+  supportUsername: string;
+  origin?: string;
+};
 
 type ChatMessage = {
   id: string;
@@ -24,48 +60,221 @@ type ChatMessage = {
   meta?: string;
 };
 
-type ChatResponse = {
+type ApiEnvelope = {
+  user?: PublicUser;
+  config?: AppConfig;
+  error?: string;
+  code?: string;
+  referralAwarded?: boolean;
+  created?: boolean;
+};
+
+type ChatResponse = ApiEnvelope & {
   text?: string;
   provider?: string;
   model?: string;
-  error?: string;
+  tier?: string;
+  chargeType?: "free" | "credits";
+  remaining?: number;
+  cost?: number;
+  balance?: number;
 };
 
-const quickPrompts = [
-  "Составь структуру сайта по продаже техники: каталог, карточка товара, корзина, оплата.",
-  "Напиши продающее описание для магазина ноутбуков и смартфонов.",
-  "Сделай чеклист запуска интернет-магазина техники.",
-  "Сгенерируй HTML-блок карточки товара с Tailwind.",
-];
+type InvoiceResponse = ApiEnvelope & {
+  paymentId?: number;
+  invoiceId?: string;
+  invoiceUrl?: string;
+  amountUsd?: number;
+  credits?: number;
+  status?: "pending" | "paid" | "expired";
+  balance?: number;
+};
 
-const initialMessages: ChatMessage[] = [
-  {
-    id: "welcome",
-    role: "assistant",
-    content:
-      "Готов. Пиши задачу, а я отвечу структурно: план, код, текст, таблица или чеклист. Интерфейс использует тот же OpenAI-compatible backend, что и бот.",
-    meta: "DarkGPT Web",
-  },
-];
+type PaymentState = {
+  packageKey: string;
+  price: number;
+  credits: number;
+  paymentId?: number;
+  invoiceUrl?: string;
+  status: "confirm" | "creating" | "pending" | "paid" | "expired" | "error";
+  message?: string;
+};
+
+const STORAGE_KEY = "darkgpt_web_user_id";
+
+const sectionIcons = {
+  chat: MessageSquare,
+  balance: Wallet,
+  referral: Users,
+  profile: User,
+  language: Languages,
+  help: HelpCircle,
+} satisfies Record<Section, typeof MessageSquare>;
+
+const quickPrompts = {
+  ru: [
+    "Объясни тему простыми словами.",
+    "Напиши продающий текст.",
+    "Помоги с кодом и покажи пример.",
+    "Сделай чеклист запуска проекта.",
+  ],
+  en: [
+    "Explain a topic in simple words.",
+    "Write persuasive copy.",
+    "Help with code and show an example.",
+    "Make a launch checklist.",
+  ],
+} satisfies Record<Language, string[]>;
 
 function nextId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function formatNumber(value: number, language: Language) {
+  const formatted = Math.trunc(value || 0).toLocaleString("en-US");
+  return language === "ru" ? formatted.replaceAll(",", " ") : formatted;
+}
+
+function cleanSupportUsername(value: string) {
+  return value.replace(/^@/, "");
+}
+
+function makeInitialMessages(language: Language): ChatMessage[] {
+  return [
+    {
+      id: "welcome",
+      role: "assistant",
+      content: t(language, "demoWelcome"),
+      meta: t(language, "assistant"),
+    },
+  ];
+}
+
+async function postJson<T>(url: string, body: Record<string, unknown>) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = (await response.json().catch(() => ({}))) as T & { error?: string; code?: string };
+  if (!response.ok) {
+    const error = new Error(data.error || "Request failed") as Error & { code?: string; data?: T };
+    error.code = data.code;
+    error.data = data;
+    throw error;
+  }
+  return data;
+}
+
 export default function ChatShell() {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [user, setUser] = useState<PublicUser | null>(null);
+  const [config, setConfig] = useState<AppConfig | null>(null);
+  const [activeSection, setActiveSection] = useState<Section>("chat");
+  const [messages, setMessages] = useState<ChatMessage[]>(makeInitialMessages("ru"));
   const [input, setInput] = useState("");
+  const [isBooting, setIsBooting] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
-  const [error, setError] = useState("");
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [copied, setCopied] = useState("");
+  const [payment, setPayment] = useState<PaymentState | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
-  const canSend = input.trim().length > 0 && !isLoading;
-  const messageCount = useMemo(() => messages.filter((message) => message.role === "user").length, [messages]);
+  const language: Language = user?.language || "ru";
+  const loc = locale(language);
+  const canSend = input.trim().length > 0 && !isLoading && Boolean(user?.languageSelected);
+  const origin = config?.origin || (typeof window !== "undefined" ? window.location.origin : "");
+  const referralLink = user ? `${origin}?ref=${user.userId}` : "";
+  const supportUrl = user
+    ? `https://t.me/${cleanSupportUsername(config?.supportUsername || "@darkgpt_support")}?text=${encodeURIComponent(
+        `${loc.userId}: ${user.userId}. `,
+      )}`
+    : "";
+
+  const applyEnvelope = useCallback((data: ApiEnvelope) => {
+    if (data.user) {
+      setUser(data.user);
+      if (data.user.language) {
+        setMessages((current) => (current.length ? current : makeInitialMessages(data.user?.language || "ru")));
+      }
+    }
+    if (data.config) {
+      setConfig(data.config);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function boot() {
+      const params = new URLSearchParams(window.location.search);
+      const referralId = params.get("ref") || params.get("start") || "";
+      const storedUserId = window.localStorage.getItem(STORAGE_KEY);
+
+      try {
+        const data = await postJson<ApiEnvelope>("/api/session", {
+          userId: storedUserId,
+          referralId,
+        });
+        if (cancelled) {
+          return;
+        }
+        applyEnvelope(data);
+        if (data.user?.userId) {
+          window.localStorage.setItem(STORAGE_KEY, data.user.userId);
+        }
+        if (data.user?.language) {
+          setMessages(makeInitialMessages(data.user.language));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setNotice(error instanceof Error ? error.message : "Could not create session");
+        }
+      } finally {
+        if (!cancelled) {
+          setIsBooting(false);
+        }
+      }
+    }
+
+    void boot();
+    return () => {
+      cancelled = true;
+    };
+  }, [applyEnvelope]);
+
+  function updateUserFromEnvelope(data: ApiEnvelope) {
+    applyEnvelope(data);
+    if (data.user?.userId) {
+      window.localStorage.setItem(STORAGE_KEY, data.user.userId);
+    }
+  }
+
+  async function selectLanguage(nextLanguage: Language) {
+    if (!user) {
+      return;
+    }
+    setIsLoading(true);
+    setNotice("");
+    try {
+      const data = await postJson<ApiEnvelope>("/api/language", {
+        userId: user.userId,
+        language: nextLanguage,
+      });
+      updateUserFromEnvelope(data);
+      setMessages(makeInitialMessages(nextLanguage));
+      setNotice(data.referralAwarded ? t(nextLanguage, "joinedByReferral") : t(nextLanguage, "languageChanged"));
+      setActiveSection("chat");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : t(nextLanguage, "errorGeneric"));
+    } finally {
+      setIsLoading(false);
+    }
+  }
 
   async function sendMessage(messageText = input) {
     const trimmed = messageText.trim();
-    if (!trimmed || isLoading) {
+    if (!trimmed || isLoading || !user?.languageSelected) {
       return;
     }
 
@@ -73,48 +282,78 @@ export default function ChatShell() {
       id: nextId(),
       role: "user",
       content: trimmed,
-      meta: "Вы",
+      meta: loc.you,
     };
 
     setMessages((current) => [...current, userMessage]);
     setInput("");
-    setError("");
+    setNotice("");
     setIsLoading(true);
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed }),
+      const data = await postJson<ChatResponse>("/api/chat", {
+        userId: user.userId,
+        message: trimmed,
       });
+      updateUserFromEnvelope(data);
 
-      const data = (await response.json()) as ChatResponse;
-      const answerText = data.text;
-      if (!response.ok || data.error || !answerText) {
-        throw new Error(data.error || "AI service unavailable");
-      }
+      const statusText =
+        data.chargeType === "credits"
+          ? t(language, "chatStatusCredits", {
+              cost: formatNumber(data.cost || 0, language),
+              balance: formatNumber(data.user?.balance ?? data.balance ?? 0, language),
+            })
+          : t(language, "chatStatusFree", {
+              free: formatNumber(data.user?.freeLeft ?? data.remaining ?? 0, language),
+              balance: formatNumber(data.user?.balance ?? data.balance ?? 0, language),
+            });
 
       setMessages((current) => [
         ...current,
         {
           id: nextId(),
           role: "assistant",
-          content: answerText,
-          meta: [data.provider, data.model].filter(Boolean).join(" / ") || "AI",
+          content: data.text || "",
+          meta: [data.provider, data.model].filter(Boolean).join(" / ") || loc.assistant,
+        },
+        {
+          id: nextId(),
+          role: "assistant",
+          content: statusText,
+          meta: "Status",
         },
       ]);
     } catch (requestError) {
-      const message = requestError instanceof Error ? requestError.message : "AI service unavailable";
-      setError(message);
+      const error = requestError as Error & { code?: string; data?: ChatResponse };
+      if (error.data) {
+        updateUserFromEnvelope(error.data);
+      }
+      const message =
+        error.code === "limit_reached"
+          ? t(language, "limitReached", {
+              free_used: user.freeTotal,
+              free_total: user.freeTotal,
+            })
+          : error.code === "not_enough_credits"
+            ? t(language, "notEnoughCredits")
+            : error.code === "request_too_long"
+              ? t(language, "requestTooLong")
+              : error.code === "ai_unavailable"
+                ? t(language, "aiUnavailable")
+                : error.message || t(language, "errorGeneric");
+      setNotice(message);
       setMessages((current) => [
         ...current,
         {
           id: nextId(),
           role: "assistant",
-          content: `Не получилось получить ответ.\n\nПричина: ${message}`,
-          meta: "Ошибка",
+          content: message,
+          meta: "Error",
         },
       ]);
+      if (error.code === "limit_reached" || error.code === "not_enough_credits") {
+        setActiveSection("balance");
+      }
     } finally {
       setIsLoading(false);
       textareaRef.current?.focus();
@@ -127,9 +366,132 @@ export default function ChatShell() {
   }
 
   function resetChat() {
-    setMessages(initialMessages);
-    setError("");
+    setMessages(makeInitialMessages(language));
+    setNotice("");
     setInput("");
+  }
+
+  async function copyText(text: string, label: string) {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+    window.setTimeout(() => setCopied(""), 1200);
+  }
+
+  function beginPayment(packageKey: string, price: number, credits: number) {
+    setPayment({ packageKey, price, credits, status: "confirm" });
+    setNotice("");
+  }
+
+  async function createPaymentInvoice() {
+    if (!user || !payment) {
+      return;
+    }
+
+    setPayment({ ...payment, status: "creating" });
+    try {
+      const data = await postJson<InvoiceResponse>("/api/payments/create", {
+        userId: user.userId,
+        packageKey: payment.packageKey,
+      });
+      updateUserFromEnvelope(data);
+      setPayment({
+        ...payment,
+        paymentId: data.paymentId,
+        invoiceUrl: data.invoiceUrl,
+        status: "pending",
+        message: t(language, "invoiceCreated", {
+          price: formatNumber(payment.price, language),
+          credits: formatNumber(payment.credits, language),
+        }),
+      });
+    } catch (error) {
+      setPayment({
+        ...payment,
+        status: "error",
+        message: error instanceof Error ? error.message : t(language, "paymentCreateError"),
+      });
+    }
+  }
+
+  async function checkPayment() {
+    if (!user || !payment?.paymentId) {
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const data = await postJson<InvoiceResponse>("/api/payments/check", {
+        userId: user.userId,
+        paymentId: payment.paymentId,
+      });
+      updateUserFromEnvelope(data);
+      if (data.status === "paid") {
+        setPayment({
+          ...payment,
+          status: "paid",
+          message: t(language, "paymentSuccess", {
+            credits: formatNumber(data.credits || payment.credits, language),
+            balance: formatNumber(data.user?.balance || data.balance || 0, language),
+          }),
+        });
+      } else if (data.status === "expired") {
+        setPayment({ ...payment, status: "expired", message: t(language, "paymentExpired") });
+      } else {
+        setPayment({ ...payment, status: "pending", message: t(language, "paymentPending") });
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : t(language, "errorGeneric"));
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  if (isBooting) {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-4 text-ink">
+        <div className="flex items-center gap-3 rounded-lg border border-line bg-white px-4 py-3 shadow-soft">
+          <Loader2 className="animate-spin text-signal" size={20} />
+          <span className="text-sm font-medium">DarkGPT</span>
+        </div>
+      </main>
+    );
+  }
+
+  if (!user?.languageSelected) {
+    return (
+      <main className="flex min-h-screen items-center justify-center px-4 text-ink">
+        <section className="w-full max-w-md rounded-lg border border-line bg-white p-6 shadow-soft">
+          <div className="mb-5 flex items-center gap-3">
+            <div className="flex h-11 w-11 items-center justify-center rounded-md bg-ink text-white">
+              <Bot size={23} />
+            </div>
+            <div>
+              <h1 className="text-xl font-semibold">DarkGPT</h1>
+              <p className="whitespace-pre-line text-sm text-slate-600">{loc.languageFirstRun}</p>
+            </div>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => void selectLanguage("ru")}
+              disabled={isLoading}
+              className="flex h-12 items-center justify-center rounded-md border border-line bg-panel text-sm font-semibold transition hover:border-signal hover:bg-white disabled:opacity-60"
+            >
+              Русский
+            </button>
+            <button
+              type="button"
+              onClick={() => void selectLanguage("en")}
+              disabled={isLoading}
+              className="flex h-12 items-center justify-center rounded-md border border-line bg-panel text-sm font-semibold transition hover:border-signal hover:bg-white disabled:opacity-60"
+            >
+              English
+            </button>
+          </div>
+          {notice ? <div className="mt-4 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">{notice}</div> : null}
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -143,62 +505,62 @@ export default function ChatShell() {
         >
           <div className="flex h-full flex-col">
             <div className="border-b border-line p-5">
-              <div className="flex items-center gap-3">
-                <div className="flex h-10 w-10 items-center justify-center rounded-md bg-ink text-white">
-                  <Bot size={22} />
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-10 w-10 items-center justify-center rounded-md bg-ink text-white">
+                    <Bot size={22} />
+                  </div>
+                  <div>
+                    <h1 className="text-lg font-semibold leading-tight">DarkGPT</h1>
+                    <p className="text-sm text-slate-600">Web</p>
+                  </div>
                 </div>
-                <div>
-                  <h1 className="text-lg font-semibold leading-tight">DarkGPT Web</h1>
-                  <p className="text-sm text-slate-600">AI-интерфейс для сайта</p>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setSidebarOpen(false)}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-ink lg:hidden"
+                  title="Close"
+                >
+                  <X size={17} />
+                </button>
               </div>
             </div>
 
-            <div className="space-y-5 p-5">
-              <section>
-                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-800">
-                  <CheckCircle2 size={16} className="text-accent" />
-                  Статус
-                </div>
-                <div className="rounded-md border border-line bg-white p-3 text-sm text-slate-700">
-                  Backend подключается через `/api/chat`. Provider и модель берутся из env на сервере.
-                </div>
-              </section>
-
-              <section>
-                <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-800">
-                  <Sparkles size={16} className="text-signal" />
-                  Быстрые запросы
-                </div>
-                <div className="space-y-2">
-                  {quickPrompts.map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      onClick={() => void sendMessage(prompt)}
-                      disabled={isLoading}
-                      className="w-full rounded-md border border-line bg-white px-3 py-2 text-left text-sm text-slate-700 transition hover:border-signal hover:text-ink disabled:cursor-not-allowed disabled:opacity-60"
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              </section>
+            <div className="grid grid-cols-2 gap-2 border-b border-line p-4 text-sm">
+              <Metric label={loc.freeToday} value={`${formatNumber(user.freeLeft, language)}/${user.freeTotal}`} />
+              <Metric label={loc.currentBalance} value={formatNumber(user.balance, language)} icon={<Zap size={14} />} />
             </div>
 
-            <div className="mt-auto border-t border-line p-5">
+            <nav className="space-y-1 p-3">
+              {(["chat", "balance", "referral", "profile", "language", "help"] as Section[]).map((section) => {
+                const Icon = sectionIcons[section];
+                const label = loc[`nav${section[0].toUpperCase()}${section.slice(1)}` as keyof typeof loc] || section;
+                return (
+                  <button
+                    key={section}
+                    type="button"
+                    onClick={() => {
+                      setActiveSection(section);
+                      setSidebarOpen(false);
+                    }}
+                    className={clsx(
+                      "flex h-10 w-full items-center gap-3 rounded-md px-3 text-left text-sm font-medium transition",
+                      activeSection === section
+                        ? "bg-ink text-white"
+                        : "text-slate-700 hover:bg-white hover:text-ink",
+                    )}
+                  >
+                    <Icon size={17} />
+                    {label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="mt-auto border-t border-line p-4">
               <div className="grid grid-cols-2 gap-2 text-sm">
-                <div className="rounded-md border border-line bg-white p-3">
-                  <div className="text-slate-500">Запросов</div>
-                  <div className="mt-1 text-xl font-semibold">{messageCount}</div>
-                </div>
-                <div className="rounded-md border border-line bg-white p-3">
-                  <div className="text-slate-500">Режим</div>
-                  <div className="mt-1 flex items-center gap-1 font-semibold">
-                    <Zap size={15} className="text-accent" />
-                    Live
-                  </div>
-                </div>
+                <Metric label={loc.requests} value={String(messages.filter((message) => message.role === "user").length)} />
+                <Metric label={loc.mode} value={loc.live} icon={<Check size={14} />} />
               </div>
             </div>
           </div>
@@ -206,92 +568,220 @@ export default function ChatShell() {
 
         <section className="flex min-h-[calc(100vh-24px)] min-w-0 flex-col">
           <header className="flex items-center justify-between border-b border-line px-4 py-3 sm:px-5">
-            <div className="flex items-center gap-3">
+            <div className="flex min-w-0 items-center gap-3">
               <button
                 type="button"
                 onClick={() => setSidebarOpen((value) => !value)}
-                className="inline-flex h-9 w-9 items-center justify-center rounded-md border border-line text-slate-700 transition hover:border-signal hover:text-ink"
-                title="Панель"
+                className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-line text-slate-700 transition hover:border-signal hover:text-ink"
+                title="Menu"
               >
-                <PanelLeft size={18} />
+                <PanelLeft size={18} className="hidden lg:block" />
+                <Menu size={18} className="lg:hidden" />
               </button>
-              <div>
-                <div className="text-sm text-slate-500">Чат</div>
-                <div className="font-semibold">Новая сессия</div>
+              <div className="min-w-0">
+                <div className="text-sm text-slate-500">{sectionTitle(activeSection, loc)}</div>
+                <div className="truncate font-semibold">{activeSection === "chat" ? loc.newSession : "DarkGPT"}</div>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={resetChat}
-              className="inline-flex h-9 items-center gap-2 rounded-md border border-line px-3 text-sm text-slate-700 transition hover:border-warning hover:text-warning"
-            >
-              <RotateCcw size={16} />
-              Сброс
-            </button>
+            {activeSection === "chat" ? (
+              <button
+                type="button"
+                onClick={resetChat}
+                className="inline-flex h-9 items-center gap-2 rounded-md border border-line px-3 text-sm text-slate-700 transition hover:border-warning hover:text-warning"
+              >
+                <RotateCcw size={16} />
+                <span className="hidden sm:inline">{loc.reset}</span>
+              </button>
+            ) : null}
           </header>
 
-          <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
-            <div className="mx-auto flex max-w-4xl flex-col gap-4">
-              {messages.map((message) => (
-                <MessageBubble key={message.id} message={message} />
-              ))}
-              {isLoading ? (
-                <div className="flex items-center gap-2 rounded-md border border-line bg-panel px-4 py-3 text-sm text-slate-600">
-                  <Loader2 size={17} className="animate-spin" />
-                  Генерирую ответ
-                </div>
-              ) : null}
-              {error ? (
-                <div className="rounded-md border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800">
-                  {error}
-                </div>
-              ) : null}
+          {notice ? (
+            <div className="border-b border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-800 sm:px-5">
+              {notice}
             </div>
-          </div>
+          ) : null}
+          {copied ? (
+            <div className="border-b border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800 sm:px-5">
+              {copied}
+            </div>
+          ) : null}
 
-          <form onSubmit={handleSubmit} className="border-t border-line bg-panel p-3 sm:p-4">
-            <div className="mx-auto flex max-w-4xl gap-2 rounded-lg border border-line bg-white p-2 shadow-sm">
-              <textarea
-                ref={textareaRef}
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void sendMessage();
-                  }
-                }}
-                rows={2}
-                maxLength={4000}
-                placeholder="Напиши задачу. Shift+Enter для новой строки."
-                className="max-h-40 min-h-[48px] flex-1 resize-none rounded-md border-0 px-3 py-2 text-sm outline-none placeholder:text-slate-400"
-              />
-              <button
-                type="submit"
-                disabled={!canSend}
-                className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-ink text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
-                title="Отправить"
-              >
-                {isLoading ? <Loader2 size={20} className="animate-spin" /> : <Send size={19} />}
-              </button>
-            </div>
-            <div className="mx-auto mt-2 flex max-w-4xl justify-between text-xs text-slate-500">
-              <span>Ответы отображаются в Markdown.</span>
-              <span>{input.length}/4000</span>
-            </div>
-          </form>
+          {activeSection === "chat" ? (
+            <ChatView
+              messages={messages}
+              input={input}
+              isLoading={isLoading}
+              language={language}
+              canSend={canSend}
+              textareaRef={textareaRef}
+              onInput={setInput}
+              onSubmit={handleSubmit}
+              onSend={sendMessage}
+              onCopy={copyText}
+            />
+          ) : null}
+
+          {activeSection === "balance" ? (
+            <BalanceView
+              user={user}
+              config={config}
+              language={language}
+              payment={payment}
+              isLoading={isLoading}
+              onBeginPayment={beginPayment}
+              onCreateInvoice={createPaymentInvoice}
+              onCheckPayment={checkPayment}
+              onCancelPayment={() => setPayment(null)}
+              onChat={() => setActiveSection("chat")}
+            />
+          ) : null}
+
+          {activeSection === "referral" ? (
+            <ReferralView
+              user={user}
+              language={language}
+              referralLink={referralLink}
+              onCopy={copyText}
+            />
+          ) : null}
+
+          {activeSection === "profile" ? <ProfileView user={user} language={language} /> : null}
+
+          {activeSection === "language" ? (
+            <LanguageView language={language} isLoading={isLoading} onSelect={selectLanguage} />
+          ) : null}
+
+          {activeSection === "help" ? (
+            <HelpView user={user} language={language} supportUrl={supportUrl} supportUsername={config?.supportUsername || "@darkgpt_support"} />
+          ) : null}
         </section>
       </div>
     </main>
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
-  const isUser = message.role === "user";
+function sectionTitle(section: Section, loc: ReturnType<typeof locale>) {
+  const titles: Record<Section, string> = {
+    chat: loc.chatTitle,
+    balance: loc.balanceTitle,
+    referral: loc.referralTitle,
+    profile: loc.profileTitle,
+    language: loc.languageTitle,
+    help: loc.helpTitle,
+  };
+  return titles[section];
+}
 
-  async function copyMessage() {
-    await navigator.clipboard.writeText(message.content);
-  }
+function Metric({ label, value, icon }: { label: string; value: string; icon?: React.ReactNode }) {
+  return (
+    <div className="rounded-md border border-line bg-white p-3">
+      <div className="text-xs leading-snug text-slate-500">{label}</div>
+      <div className="mt-1 flex items-center gap-1 truncate text-lg font-semibold">
+        {icon}
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function ChatView({
+  messages,
+  input,
+  isLoading,
+  language,
+  canSend,
+  textareaRef,
+  onInput,
+  onSubmit,
+  onSend,
+  onCopy,
+}: {
+  messages: ChatMessage[];
+  input: string;
+  isLoading: boolean;
+  language: Language;
+  canSend: boolean;
+  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  onInput: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSend: (value?: string) => Promise<void>;
+  onCopy: (text: string, label: string) => Promise<void>;
+}) {
+  const loc = locale(language);
+  return (
+    <>
+      <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
+        <div className="mx-auto flex max-w-4xl flex-col gap-4">
+          <div className="grid gap-2 sm:grid-cols-2">
+            {quickPrompts[language].map((prompt) => (
+              <button
+                key={prompt}
+                type="button"
+                onClick={() => void onSend(prompt)}
+                disabled={isLoading}
+                className="rounded-md border border-line bg-panel px-3 py-2 text-left text-sm text-slate-700 transition hover:border-signal hover:bg-white hover:text-ink disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {prompt}
+              </button>
+            ))}
+          </div>
+          {messages.map((message) => (
+            <MessageBubble key={message.id} message={message} language={language} onCopy={onCopy} />
+          ))}
+          {isLoading ? (
+            <div className="flex items-center gap-2 rounded-md border border-line bg-panel px-4 py-3 text-sm text-slate-600">
+              <Loader2 size={17} className="animate-spin" />
+              {loc.generating}
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <form onSubmit={onSubmit} className="border-t border-line bg-panel p-3 sm:p-4">
+        <div className="mx-auto flex max-w-4xl gap-2 rounded-lg border border-line bg-white p-2 shadow-sm">
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(event) => onInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                void onSend();
+              }
+            }}
+            rows={2}
+            maxLength={4000}
+            placeholder={loc.placeholder}
+            className="max-h-40 min-h-[48px] flex-1 resize-none rounded-md border-0 px-3 py-2 text-sm outline-none placeholder:text-slate-400"
+          />
+          <button
+            type="submit"
+            disabled={!canSend}
+            className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-ink text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-300"
+            title={loc.send}
+          >
+            {isLoading ? <Loader2 size={20} className="animate-spin" /> : <Send size={19} />}
+          </button>
+        </div>
+        <div className="mx-auto mt-2 flex max-w-4xl justify-end text-xs text-slate-500">
+          <span>{input.length}/4000</span>
+        </div>
+      </form>
+    </>
+  );
+}
+
+function MessageBubble({
+  message,
+  language,
+  onCopy,
+}: {
+  message: ChatMessage;
+  language: Language;
+  onCopy: (text: string, label: string) => Promise<void>;
+}) {
+  const loc = locale(language);
+  const isUser = message.role === "user";
 
   return (
     <article className={clsx("flex gap-3", isUser ? "justify-end" : "justify-start")}>
@@ -301,17 +791,22 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         </div>
       ) : null}
 
-      <div className={clsx("min-w-0 max-w-[88%] rounded-lg border px-4 py-3", isUser ? "border-signal bg-blue-50" : "border-line bg-panel")}>
+      <div
+        className={clsx(
+          "min-w-0 max-w-[88%] rounded-lg border px-4 py-3",
+          isUser ? "border-signal bg-blue-50" : "border-line bg-panel",
+        )}
+      >
         <div className="mb-2 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+          <div className="flex min-w-0 items-center gap-2 truncate text-xs font-semibold uppercase text-slate-500">
             {isUser ? <User size={13} /> : <Bot size={13} />}
-            {message.meta || (isUser ? "Вы" : "AI")}
+            <span className="truncate">{message.meta || (isUser ? loc.you : loc.assistant)}</span>
           </div>
           <button
             type="button"
-            onClick={copyMessage}
-            className="inline-flex h-7 w-7 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-ink"
-            title="Копировать"
+            onClick={() => void onCopy(message.content, loc.copied)}
+            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-ink"
+            title={loc.copy}
           >
             <Copy size={14} />
           </button>
@@ -327,5 +822,323 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         </div>
       ) : null}
     </article>
+  );
+}
+
+function BalanceView({
+  user,
+  config,
+  language,
+  payment,
+  isLoading,
+  onBeginPayment,
+  onCreateInvoice,
+  onCheckPayment,
+  onCancelPayment,
+  onChat,
+}: {
+  user: PublicUser;
+  config: AppConfig | null;
+  language: Language;
+  payment: PaymentState | null;
+  isLoading: boolean;
+  onBeginPayment: (packageKey: string, price: number, credits: number) => void;
+  onCreateInvoice: () => Promise<void>;
+  onCheckPayment: () => Promise<void>;
+  onCancelPayment: () => void;
+  onChat: () => void;
+}) {
+  const loc = locale(language);
+  const packages = config?.packages || {};
+
+  return (
+    <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-4xl space-y-5">
+        <div className="grid gap-3 sm:grid-cols-3">
+          <Stat label={loc.currentBalance} value={`${formatNumber(user.balance, language)} ${loc.credits}`} icon={<Wallet size={18} />} />
+          <Stat label={loc.freeToday} value={`${formatNumber(user.freeLeft, language)}/${user.freeTotal}`} icon={<Zap size={18} />} />
+          <Stat label={loc.requestCost} value={`${formatNumber(config?.requestCost || 12, language)} ${loc.credits}`} icon={<CreditCard size={18} />} />
+        </div>
+
+        <section className="space-y-3">
+          <div>
+            <h2 className="text-lg font-semibold">{loc.balanceTitle}</h2>
+            <p className="mt-1 text-sm text-slate-600">{loc.balanceScreen}</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {Object.entries(packages).map(([packageKey, pack]) => (
+              <button
+                key={packageKey}
+                type="button"
+                onClick={() => onBeginPayment(packageKey, pack.price, pack.credits)}
+                className="flex items-center justify-between rounded-md border border-line bg-panel p-4 text-left transition hover:border-signal hover:bg-white"
+              >
+                <span className="font-semibold">
+                  ${formatNumber(pack.price, language)}
+                  {" -> "}
+                  {formatNumber(pack.credits, language)} {loc.credits}
+                </span>
+                <span className="inline-flex h-9 w-9 items-center justify-center rounded-md bg-ink text-white">
+                  <Wallet size={17} />
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        {payment ? (
+          <section className="rounded-lg border border-line bg-panel p-4">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-semibold">{loc.topUp}</h3>
+                <p className="mt-1 whitespace-pre-line text-sm text-slate-700">
+                  {payment.message ||
+                    t(language, "topupConfirm", {
+                      price: formatNumber(payment.price, language),
+                      credits: formatNumber(payment.credits, language),
+                    })}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={onCancelPayment}
+                className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-white hover:text-ink"
+                title={loc.back}
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {payment.status === "confirm" || payment.status === "error" ? (
+                <button
+                  type="button"
+                  onClick={() => void onCreateInvoice()}
+                  className="inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
+                >
+                  <CreditCard size={16} />
+                  {loc.createInvoice}
+                </button>
+              ) : null}
+              {payment.status === "creating" ? (
+                <button
+                  type="button"
+                  disabled
+                  className="inline-flex h-10 items-center gap-2 rounded-md bg-slate-300 px-4 text-sm font-semibold text-white"
+                >
+                  <Loader2 size={16} className="animate-spin" />
+                  {loc.createInvoice}
+                </button>
+              ) : null}
+              {payment.invoiceUrl && payment.status !== "paid" && payment.status !== "expired" ? (
+                <a
+                  href={payment.invoiceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-semibold text-slate-800 transition hover:border-signal"
+                >
+                  <CreditCard size={16} />
+                  {loc.payCrypto}
+                </a>
+              ) : null}
+              {payment.paymentId && payment.status !== "paid" && payment.status !== "expired" ? (
+                <button
+                  type="button"
+                  onClick={() => void onCheckPayment()}
+                  disabled={isLoading}
+                  className="inline-flex h-10 items-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-semibold text-slate-800 transition hover:border-signal disabled:opacity-60"
+                >
+                  {isLoading ? <Loader2 size={16} className="animate-spin" /> : <RefreshCcw size={16} />}
+                  {loc.checkPayment}
+                </button>
+              ) : null}
+              {payment.status === "paid" ? (
+                <button
+                  type="button"
+                  onClick={onChat}
+                  className="inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
+                >
+                  <MessageSquare size={16} />
+                  {loc.goToChat}
+                </button>
+              ) : null}
+            </div>
+          </section>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ReferralView({
+  user,
+  language,
+  referralLink,
+  onCopy,
+}: {
+  user: PublicUser;
+  language: Language;
+  referralLink: string;
+  onCopy: (text: string, label: string) => Promise<void>;
+}) {
+  const loc = locale(language);
+  const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(referralLink)}&text=${encodeURIComponent(
+    language === "ru" ? "Попробуй DarkGPT" : "Try DarkGPT",
+  )}`;
+
+  return (
+    <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-4xl space-y-5">
+        <div>
+          <h2 className="text-lg font-semibold">{loc.referralTitle}</h2>
+          <p className="mt-1 text-sm text-slate-600">{loc.referralText}</p>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Stat label={loc.invited} value={formatNumber(user.referralCount, language)} icon={<Users size={18} />} />
+          <Stat label={loc.paidReferrals} value={formatNumber(user.paidReferralCount, language)} icon={<CreditCard size={18} />} />
+        </div>
+        <section className="rounded-lg border border-line bg-panel p-4">
+          <div className="mb-2 text-sm font-semibold text-slate-700">{loc.referralLink}</div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <code className="min-w-0 flex-1 overflow-x-auto rounded-md border border-line bg-white px-3 py-2 text-sm">
+              {referralLink}
+            </code>
+            <button
+              type="button"
+              onClick={() => void onCopy(referralLink, loc.copied)}
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line bg-white px-4 text-sm font-semibold text-slate-800 transition hover:border-signal"
+            >
+              <Copy size={16} />
+              {loc.copy}
+            </button>
+            <a
+              href={shareUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              <Share2 size={16} />
+              {loc.share}
+            </a>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function ProfileView({ user, language }: { user: PublicUser; language: Language }) {
+  const loc = locale(language);
+  const langName = language === "ru" ? loc.russian : loc.english;
+  return (
+    <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-4xl space-y-5">
+        <h2 className="text-lg font-semibold">{loc.profileTitle}</h2>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <Stat label={loc.userId} value={user.userId} icon={<User size={18} />} />
+          <Stat label={loc.interfaceLanguage} value={langName} icon={<Languages size={18} />} />
+          <Stat label={loc.currentBalance} value={`${formatNumber(user.balance, language)} ${loc.credits}`} icon={<Wallet size={18} />} />
+          <Stat label={loc.freeToday} value={`${formatNumber(user.freeLeft, language)}/${user.freeTotal}`} icon={<Zap size={18} />} />
+          <Stat label={loc.invited} value={formatNumber(user.referralCount, language)} icon={<Users size={18} />} />
+          <Stat label={loc.paidReferrals} value={formatNumber(user.paidReferralCount, language)} icon={<CreditCard size={18} />} />
+          <Stat label={loc.totalPurchased} value={formatNumber(user.totalPurchased, language)} icon={<Wallet size={18} />} />
+          <Stat label={loc.totalSpent} value={formatNumber(user.totalSpent, language)} icon={<CreditCard size={18} />} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LanguageView({
+  language,
+  isLoading,
+  onSelect,
+}: {
+  language: Language;
+  isLoading: boolean;
+  onSelect: (language: Language) => Promise<void>;
+}) {
+  const loc = locale(language);
+  return (
+    <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-4xl space-y-4">
+        <div>
+          <h2 className="text-lg font-semibold">{loc.languageTitle}</h2>
+          <p className="mt-1 text-sm text-slate-600">{loc.languageSelect}</p>
+        </div>
+        <div className="grid gap-2 sm:max-w-md sm:grid-cols-2">
+          {(["ru", "en"] as Language[]).map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => void onSelect(item)}
+              disabled={isLoading}
+              className={clsx(
+                "flex h-12 items-center justify-center gap-2 rounded-md border px-4 text-sm font-semibold transition disabled:opacity-60",
+                language === item ? "border-ink bg-ink text-white" : "border-line bg-panel text-slate-800 hover:border-signal hover:bg-white",
+              )}
+            >
+              {language === item ? <Check size={16} /> : <Languages size={16} />}
+              {item === "ru" ? loc.russian : loc.english}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function HelpView({
+  user,
+  language,
+  supportUrl,
+  supportUsername,
+}: {
+  user: PublicUser;
+  language: Language;
+  supportUrl: string;
+  supportUsername: string;
+}) {
+  const loc = locale(language);
+  return (
+    <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
+      <div className="mx-auto max-w-4xl space-y-5">
+        <div>
+          <h2 className="text-lg font-semibold">{loc.helpTitle}</h2>
+          <p className="mt-1 whitespace-pre-line text-sm text-slate-600">{loc.helpScreen}</p>
+        </div>
+        <section className="rounded-lg border border-line bg-panel p-4">
+          <div className="mb-2 flex items-center gap-2 font-semibold">
+            <HelpCircle size={18} />
+            {loc.support}
+          </div>
+          <p className="text-sm text-slate-700">{loc.supportText}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <code className="rounded-md border border-line bg-white px-3 py-2 text-sm">{supportUsername}</code>
+            <code className="rounded-md border border-line bg-white px-3 py-2 text-sm">
+              {loc.userId}: {user.userId}
+            </code>
+            <a
+              href={supportUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-10 items-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              <MessageSquare size={16} />
+              {loc.support}
+            </a>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, icon }: { label: string; value: string; icon: React.ReactNode }) {
+  return (
+    <div className="rounded-md border border-line bg-panel p-4">
+      <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-md bg-white text-slate-700">{icon}</div>
+      <div className="text-sm text-slate-500">{label}</div>
+      <div className="mt-1 break-words text-lg font-semibold">{value}</div>
+    </div>
   );
 }
