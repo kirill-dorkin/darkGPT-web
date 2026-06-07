@@ -1,0 +1,82 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+  background: #eef2f7;
+  color: #101418;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(238, 242, 247, 0.96)),
+    radial-gradient(circle at 20% 0%, rgba(37, 99, 235, 0.14), transparent 30%),
+    #eef2f7;
+  color: #101418;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+::selection {
+  background: rgba(37, 99, 235, 0.18);
+}
+
+.markdown-body {
+  line-height: 1.62;
+}
+
+.markdown-body p {
+  margin: 0 0 0.85rem;
+}
+
+.markdown-body p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.5rem 0 0.9rem 1.15rem;
+  padding: 0;
+}
+
+.markdown-body li {
+  margin: 0.2rem 0;
+}
+
+.markdown-body code {
+  border: 1px solid #d8dde5;
+  border-radius: 5px;
+  background: #f6f7f9;
+  padding: 0.1rem 0.3rem;
+  font-size: 0.88em;
+}
+
+.markdown-body pre {
+  overflow: auto;
+  border: 1px solid #d8dde5;
+  border-radius: 8px;
+  background: #101418;
+  color: #f8fafc;
+  padding: 0.9rem;
+}
+
+.markdown-body pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
