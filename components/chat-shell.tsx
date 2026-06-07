@@ -140,28 +140,6 @@ type TelegramDiagnostics = {
   summary: string;
 };
 
-type TelegramCodeLoginState = {
-  code: string;
-  botStartUrl: string;
-  expiresAt: string;
-  status: "idle" | "creating" | "pending" | "checking" | "confirmed" | "expired" | "error";
-  message?: string;
-};
-
-type TelegramCodeStartResponse = ApiEnvelope & {
-  code?: string;
-  botStartUrl?: string;
-  expiresAt?: string;
-  status?: TelegramCodeLoginState["status"];
-};
-
-type TelegramCodeCheckResponse = ApiEnvelope & {
-  status?: "pending" | "confirmed" | "expired" | "not_found";
-  telegramUserId?: string;
-  telegramUsername?: string | null;
-  expiresAt?: string;
-};
-
 const STORAGE_KEY = "darkgpt_web_user_id";
 const TELEGRAM_ATTEMPT_KEY = "darkgpt_telegram_login_attempt";
 
@@ -303,12 +281,6 @@ export default function ChatShell() {
   const [telegramAttempt, setTelegramAttempt] = useState<TelegramLoginAttempt | null>(null);
   const [telegramDiagnostics, setTelegramDiagnostics] = useState<TelegramDiagnostics | null>(null);
   const [isCheckingTelegram, setIsCheckingTelegram] = useState(false);
-  const [telegramCodeLogin, setTelegramCodeLogin] = useState<TelegramCodeLoginState>({
-    code: "",
-    botStartUrl: "",
-    expiresAt: "",
-    status: "idle",
-  });
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const language: Language = user?.language || "ru";
@@ -561,101 +533,6 @@ export default function ChatShell() {
     }
   }
 
-  async function startTelegramCodeLogin() {
-    if (!user?.userId) {
-      return;
-    }
-
-    setTelegramCodeLogin((current) => ({ ...current, status: "creating", message: "" }));
-    setNotice("");
-    try {
-      const data = await postJson<TelegramCodeStartResponse>("/api/auth/telegram-code/start", {
-        userId: user.userId,
-      });
-      updateUserFromEnvelope(data);
-      setTelegramCodeLogin({
-        code: data.code || "",
-        botStartUrl: data.botStartUrl || "",
-        expiresAt: data.expiresAt || "",
-        status: "pending",
-        message: t(language, "telegramCodePending"),
-      });
-    } catch (error) {
-      setTelegramCodeLogin((current) => ({
-        ...current,
-        status: "error",
-        message: error instanceof Error ? error.message : t(language, "telegramCodeError"),
-      }));
-    }
-  }
-
-  async function checkTelegramCodeLogin(silent = false) {
-    if (!user?.userId || !telegramCodeLogin.code) {
-      return;
-    }
-
-    if (!silent) {
-      setTelegramCodeLogin((current) => ({ ...current, status: "checking" }));
-    }
-    try {
-      const data = await postJson<TelegramCodeCheckResponse>("/api/auth/telegram-code/check", {
-        userId: user.userId,
-        code: telegramCodeLogin.code,
-      });
-      if (data.status === "confirmed" && data.user) {
-        updateUserFromEnvelope(data);
-        window.localStorage.setItem(STORAGE_KEY, data.user.userId);
-        clearTelegramLoginAttempt();
-        setTelegramAttempt(null);
-        setTelegramCodeLogin((current) => ({
-          ...current,
-          status: "confirmed",
-          message: t(data.user?.language || language, "telegramCodeConfirmed"),
-        }));
-        setNotice(t(data.user.language || language, "telegramLoggedIn"));
-        setActiveSection(data.user.languageSelected ? "profile" : "language");
-        return;
-      }
-
-      if (data.status === "expired") {
-        setTelegramCodeLogin((current) => ({
-          ...current,
-          expiresAt: data.expiresAt || current.expiresAt,
-          status: "expired",
-          message: t(language, "telegramCodeExpired"),
-        }));
-        return;
-      }
-
-      setTelegramCodeLogin((current) => ({
-        ...current,
-        expiresAt: data.expiresAt || current.expiresAt,
-        status: "pending",
-        message: t(language, "telegramCodePending"),
-      }));
-    } catch (error) {
-      if (!silent) {
-        setTelegramCodeLogin((current) => ({
-          ...current,
-          status: "error",
-          message: error instanceof Error ? error.message : t(language, "telegramCodeError"),
-        }));
-      }
-    }
-  }
-
-  useEffect(() => {
-    if (telegramCodeLogin.status !== "pending" || !telegramCodeLogin.code || !user?.userId) {
-      return;
-    }
-
-    const timer = window.setInterval(() => {
-      void checkTelegramCodeLogin(true);
-    }, 3000);
-
-    return () => window.clearInterval(timer);
-  });
-
   async function copyText(text: string, label: string) {
     await navigator.clipboard.writeText(text);
     setCopied(label);
@@ -788,12 +665,6 @@ export default function ChatShell() {
               diagnostics={telegramDiagnostics}
               isChecking={isCheckingTelegram}
               onCheck={() => void checkTelegramDiagnostics()}
-            />
-            <TelegramCodeLoginPanel
-              language={language}
-              state={telegramCodeLogin}
-              onStart={() => void startTelegramCodeLogin()}
-              onCheck={() => void checkTelegramCodeLogin()}
             />
           </div>
           {notice ? <div className="mt-4 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">{notice}</div> : null}
@@ -967,9 +838,6 @@ export default function ChatShell() {
               isCheckingTelegram={isCheckingTelegram}
               onTelegramAttempt={handleTelegramAttempt}
               onCheckTelegram={() => void checkTelegramDiagnostics()}
-              telegramCodeLogin={telegramCodeLogin}
-              onStartTelegramCode={() => void startTelegramCodeLogin()}
-              onCheckTelegramCode={() => void checkTelegramCodeLogin()}
             />
           ) : null}
 
@@ -1152,91 +1020,6 @@ function TelegramDiagnosticsPanel({
             <Send size={15} />
             {loc.telegramOpenOAuth}
           </a>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function TelegramCodeLoginPanel({
-  language,
-  state,
-  onStart,
-  onCheck,
-}: {
-  language: Language;
-  state: TelegramCodeLoginState;
-  onStart: () => void;
-  onCheck: () => void;
-}) {
-  const loc = locale(language);
-  const isBusy = state.status === "creating" || state.status === "checking";
-  const hasCode = Boolean(state.code && state.botStartUrl);
-  const expiresAt = state.expiresAt ? new Date(state.expiresAt).toLocaleString(language === "ru" ? "ru-RU" : "en-US") : "";
-
-  return (
-    <div className="mt-3 rounded-md border border-line bg-white p-3 text-sm">
-      <div className="font-semibold text-slate-800">{loc.telegramCodeLoginTitle}</div>
-      <p className="mt-1 text-slate-600">{loc.telegramCodeLoginHint}</p>
-
-      {hasCode ? (
-        <div className="mt-3 grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
-          <div className="rounded-md border border-line bg-panel px-3 py-2">
-            <div className="text-xs text-slate-500">{loc.telegramCodeValue}</div>
-            <div className="mt-1 font-mono text-lg font-semibold tracking-normal text-ink">{state.code}</div>
-            {expiresAt ? (
-              <div className="mt-1 text-xs text-slate-500">
-                {loc.telegramCodeExpires}: {expiresAt}
-              </div>
-            ) : null}
-          </div>
-          <div className="flex flex-col gap-2">
-            <a
-              href={state.botStartUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-md bg-ink px-3 text-sm font-semibold text-white transition hover:bg-slate-800"
-            >
-              <Send size={15} />
-              {loc.telegramCodeOpenBot}
-            </a>
-            <button
-              type="button"
-              onClick={onCheck}
-              disabled={isBusy}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line bg-white px-3 text-sm font-semibold text-slate-800 transition hover:border-signal disabled:opacity-60"
-            >
-              {state.status === "checking" ? <Loader2 size={15} className="animate-spin" /> : <RefreshCcw size={15} />}
-              {state.status === "checking" ? loc.telegramCodeChecking : loc.telegramCodeCheck}
-            </button>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-        <button
-          type="button"
-          onClick={onStart}
-          disabled={isBusy}
-          className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-line bg-panel px-3 text-sm font-semibold text-slate-800 transition hover:border-signal hover:bg-white disabled:opacity-60"
-        >
-          {state.status === "creating" ? <Loader2 size={15} className="animate-spin" /> : <RefreshCcw size={15} />}
-          {state.status === "creating" ? loc.telegramCodeCreating : loc.telegramCodeCreate}
-        </button>
-      </div>
-
-      {state.message ? (
-        <div
-          className={clsx(
-            "mt-3 rounded-md border px-3 py-2",
-            state.status === "confirmed"
-              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-              : state.status === "expired" || state.status === "error"
-                ? "border-red-200 bg-red-50 text-red-800"
-                : "border-orange-200 bg-orange-50 text-orange-800",
-          )}
-        >
-          {state.message}
         </div>
       ) : null}
     </div>
@@ -1622,9 +1405,6 @@ function ProfileView({
   isCheckingTelegram,
   onTelegramAttempt,
   onCheckTelegram,
-  telegramCodeLogin,
-  onStartTelegramCode,
-  onCheckTelegramCode,
 }: {
   user: PublicUser;
   language: Language;
@@ -1635,9 +1415,6 @@ function ProfileView({
   isCheckingTelegram: boolean;
   onTelegramAttempt: (attempt: TelegramLoginAttempt) => void;
   onCheckTelegram: () => void;
-  telegramCodeLogin: TelegramCodeLoginState;
-  onStartTelegramCode: () => void;
-  onCheckTelegramCode: () => void;
 }) {
   const loc = locale(language);
   const langName = language === "ru" ? loc.russian : loc.english;
@@ -1676,12 +1453,6 @@ function ProfileView({
             diagnostics={telegramDiagnostics}
             isChecking={isCheckingTelegram}
             onCheck={onCheckTelegram}
-          />
-          <TelegramCodeLoginPanel
-            language={language}
-            state={telegramCodeLogin}
-            onStart={onStartTelegramCode}
-            onCheck={onCheckTelegramCode}
           />
         </section>
       </div>
