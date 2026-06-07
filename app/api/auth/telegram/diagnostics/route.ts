@@ -67,6 +67,7 @@ export async function GET(request: Request) {
   }
   oauthUrl.searchParams.set("origin", origin);
   oauthUrl.searchParams.set("return_to", callbackUrl.toString());
+  oauthUrl.searchParams.set("request_access", "write");
 
   checks.push(
     check(
@@ -113,10 +114,10 @@ export async function GET(request: Request) {
   checks.push(
     check(
       "write_access",
-      text(language, "Лишний доступ", "Extra access"),
-      oauthUrl.searchParams.has("request_access") ? "warning" : "ok",
+      text(language, "Доступ Telegram", "Telegram access"),
+      oauthUrl.searchParams.get("request_access") === "write" ? "ok" : "warning",
       oauthUrl.searchParams.has("request_access")
-        ? text(language, "OAuth всё ещё просит request_access=write.", "OAuth still requests request_access=write.")
+        ? text(language, "OAuth просит request_access=write: Telegram должен показать подтверждение доступа.", "OAuth requests request_access=write: Telegram should show an access confirmation.")
         : text(language, "request_access=write не отправляется.", "request_access=write is not sent."),
     ),
   );
