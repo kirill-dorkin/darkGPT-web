@@ -67,7 +67,15 @@ export async function GET(request: Request) {
     callbackUrl.searchParams.set("currentUserId", currentUserId);
   }
 
-  const oauthUrl = new URL("https://oauth.telegram.org/js/telegram-login.js?5");
+  const sdkUrl = new URL("https://oauth.telegram.org/js/telegram-login.js?5");
+  const oauthUrl = new URL("https://oauth.telegram.org/auth");
+  if (clientId) {
+    oauthUrl.searchParams.set("response_type", "post_message");
+    oauthUrl.searchParams.set("client_id", clientId);
+    oauthUrl.searchParams.set("redirect_uri", origin);
+    oauthUrl.searchParams.set("scope", "openid profile telegram:bot_access");
+    oauthUrl.searchParams.set("origin", origin);
+  }
 
   checks.push(
     check(
@@ -127,7 +135,7 @@ export async function GET(request: Request) {
       "write_access",
       text(language, "Доступ Telegram", "Telegram access"),
       "ok",
-      text(language, "Кнопка вызывает Telegram.Login.auth с request_access=['write'].", "The button calls Telegram.Login.auth with request_access=['write']."),
+      text(language, "Popup URL содержит scope=telegram:bot_access и origin сайта.", "Popup URL contains scope=telegram:bot_access and the site origin."),
     ),
   );
 
@@ -185,7 +193,7 @@ export async function GET(request: Request) {
 
   if (clientId) {
     try {
-      const { response, body } = await fetchText(oauthUrl.toString());
+      const { response, body } = await fetchText(sdkUrl.toString());
       const sdkLoaded = body.includes("Telegram.Login") && body.includes("request_access");
 
       checks.push(
@@ -196,6 +204,18 @@ export async function GET(request: Request) {
           response.ok && sdkLoaded
             ? text(language, "telegram-login.js загружается.", "telegram-login.js loads successfully.")
             : text(language, `telegram-login.js не загрузился корректно. HTTP ${response.status}.`, `telegram-login.js did not load correctly. HTTP ${response.status}.`),
+        ),
+      );
+
+      const { response: authResponse, body: authBody } = await fetchText(oauthUrl.toString());
+      checks.push(
+        check(
+          "popup_origin",
+          text(language, "Origin в popup", "Popup origin"),
+          authResponse.ok && !authBody.includes("origin required") ? "ok" : "error",
+          authResponse.ok && !authBody.includes("origin required")
+            ? text(language, "Telegram OAuth больше не отвечает origin required.", "Telegram OAuth no longer responds with origin required.")
+            : text(language, "Telegram OAuth всё ещё отвечает origin required.", "Telegram OAuth still responds with origin required."),
         ),
       );
 

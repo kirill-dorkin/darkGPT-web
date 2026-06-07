@@ -158,24 +158,10 @@ type TelegramLoginPayload = {
   error?: string;
 };
 
-type TelegramLoginSdk = {
-  Login?: {
-    auth: (
-      options: { client_id: number; request_access?: string[]; lang?: string },
-      callback: (data: TelegramLoginPayload) => void,
-    ) => void;
-  };
-};
-
-declare global {
-  interface Window {
-    Telegram?: TelegramLoginSdk;
-  }
-}
-
 const STORAGE_KEY = "darkgpt_web_user_id";
 const TELEGRAM_ATTEMPT_KEY = "darkgpt_telegram_login_attempt";
 const TELEGRAM_LOGIN_SCRIPT = "https://oauth.telegram.org/js/telegram-login.js?5";
+const TELEGRAM_OAUTH_ORIGIN = "https://oauth.telegram.org";
 
 const sectionIcons = {
   chat: MessageSquare,
@@ -301,7 +287,7 @@ function telegramErrorReason(language: Language, code?: string) {
 
 function loadTelegramLoginScript() {
   return new Promise<void>((resolve, reject) => {
-    if (window.Telegram?.Login?.auth) {
+    if (document.querySelector<HTMLScriptElement>(`script[src="${TELEGRAM_LOGIN_SCRIPT}"]`)) {
       resolve();
       return;
     }
@@ -320,6 +306,90 @@ function loadTelegramLoginScript() {
     script.onerror = () => reject(new Error("Telegram Login script failed to load"));
     document.head.appendChild(script);
   });
+}
+
+function parseTelegramMessageData(value: unknown) {
+  if (typeof value === "string") {
+    try {
+      return JSON.parse(value) as { event?: string; result?: string; error?: string };
+    } catch {
+      return null;
+    }
+  }
+  if (value && typeof value === "object") {
+    return value as { event?: string; result?: string; error?: string };
+  }
+  return null;
+}
+
+function openTelegramLoginPopup(clientId: string, language: Language, onAuth: (data: TelegramLoginPayload) => void) {
+  const redirectUri = `${window.location.origin}${window.location.pathname}`;
+  const authUrl = new URL("/auth", TELEGRAM_OAUTH_ORIGIN);
+  authUrl.searchParams.set("response_type", "post_message");
+  authUrl.searchParams.set("client_id", clientId);
+  authUrl.searchParams.set("redirect_uri", redirectUri);
+  authUrl.searchParams.set("scope", "openid profile telegram:bot_access");
+  authUrl.searchParams.set("origin", window.location.origin);
+  authUrl.searchParams.set("lang", language);
+
+  const width = 550;
+  const height = 650;
+  const screen = window.screen as Screen & { availLeft?: number; availTop?: number };
+  const left = Math.max(0, (screen.width - width) / 2) + (screen.availLeft || 0);
+  const top = Math.max(0, (screen.height - height) / 2) + (screen.availTop || 0);
+  const features = `width=${width},height=${height},left=${left},top=${top},status=0,location=0,menubar=0,toolbar=0`;
+  const popup = window.open(authUrl.toString(), "telegram_oidc_login", features);
+
+  if (!popup) {
+    onAuth({ error: "popup_blocked" });
+    return;
+  }
+
+  let finished = false;
+  let closeTimer: number | null = null;
+
+  const cleanup = () => {
+    window.removeEventListener("message", handleMessage);
+    if (closeTimer) {
+      window.clearInterval(closeTimer);
+    }
+  };
+
+  const finish = (payload: TelegramLoginPayload) => {
+    if (finished) {
+      return;
+    }
+    finished = true;
+    cleanup();
+    onAuth(payload);
+  };
+
+  function handleMessage(event: MessageEvent) {
+    if (event.origin !== TELEGRAM_OAUTH_ORIGIN || event.source !== popup) {
+      return;
+    }
+    const data = parseTelegramMessageData(event.data);
+    if (!data || data.event !== "auth_result") {
+      return;
+    }
+    if (data.error) {
+      finish({ error: data.error });
+      return;
+    }
+    if (typeof data.result === "string" && data.result) {
+      finish({ id_token: data.result });
+      return;
+    }
+    finish({ error: "missing id_token" });
+  }
+
+  window.addEventListener("message", handleMessage);
+  popup.focus();
+  closeTimer = window.setInterval(() => {
+    if (popup.closed) {
+      finish({ error: "popup_closed" });
+    }
+  }, 250);
 }
 
 export default function ChatShell() {
@@ -994,7 +1064,7 @@ function TelegramLoginButton({
     );
   }
 
-  async function openTelegramLogin() {
+  function openTelegramLogin() {
     onAttempt({
       at: Date.now(),
       userId: currentUserId,
@@ -1004,25 +1074,13 @@ function TelegramLoginButton({
       status: "opened",
     });
 
-    try {
-      await loadTelegramLoginScript();
-      window.Telegram?.Login?.auth(
-        {
-          client_id: Number(clientId),
-          request_access: ["write"],
-          lang: language,
-        },
-        (data) => onAuth(data, currentUserId),
-      );
-    } catch (error) {
-      onAuth({ error: error instanceof Error ? error.message : "Telegram Login script failed to load" }, currentUserId);
-    }
+    openTelegramLoginPopup(clientId, language, (data) => onAuth(data, currentUserId));
   }
 
   return (
     <button
       type="button"
-      onClick={() => void openTelegramLogin()}
+      onClick={openTelegramLogin}
       className="flex h-11 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
     >
       <Send size={17} />
