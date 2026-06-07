@@ -1,4 +1,4 @@
-import { randomInt } from "crypto";
+import { createHash, randomBytes, randomInt } from "crypto";
 import { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   FREE_REQUESTS_PER_DAY,
@@ -43,6 +43,18 @@ export type PaymentRecord = {
   paid_at: Date | null;
 };
 
+export type TelegramLoginCodeRecord = {
+  id: number;
+  code_hash: string;
+  web_user_id: string;
+  telegram_user_id: string | null;
+  telegram_username: string | null;
+  status: "pending" | "confirmed" | "expired";
+  created_at: Date;
+  expires_at: Date;
+  confirmed_at: Date | null;
+};
+
 export type RequestAccess =
   | { canUse: true; type: "free" | "credits"; remaining: number; cost: number }
   | { canUse: false; type: "user_not_found" | "limit_reached" | "not_enough_credits"; remaining: number | null; cost: number };
@@ -50,6 +62,8 @@ export type RequestAccess =
 export type ChargeResult =
   | { success: true; type: "free" | "credits"; remaining: number; cost: number; balance: number }
   | { success: false; type: "limit_reached" | "not_enough_credits"; remaining: number; cost: number; balance: number };
+
+const TELEGRAM_LOGIN_CODE_TTL_MS = 10 * 60 * 1000;
 
 let pool: Pool | null = null;
 let schemaPromise: Promise<void> | null = null;
@@ -135,6 +149,27 @@ async function ensureSchema() {
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
       `);
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS telegram_login_codes (
+          id SERIAL PRIMARY KEY,
+          code_hash VARCHAR(64) NOT NULL UNIQUE,
+          web_user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+          telegram_user_id BIGINT REFERENCES users(user_id),
+          telegram_username VARCHAR(255),
+          status VARCHAR(32) NOT NULL DEFAULT 'pending',
+          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+          expires_at TIMESTAMPTZ NOT NULL,
+          confirmed_at TIMESTAMPTZ
+        )
+      `);
+      await db.query(`
+        CREATE INDEX IF NOT EXISTS idx_telegram_login_codes_web_user
+        ON telegram_login_codes(web_user_id, status)
+      `);
+      await db.query(`
+        CREATE INDEX IF NOT EXISTS idx_telegram_login_codes_expires
+        ON telegram_login_codes(expires_at)
+      `);
     })();
   }
 
@@ -196,6 +231,19 @@ function rowToPayment(row: PaymentRecord | undefined): PaymentRecord | null {
   };
 }
 
+function rowToTelegramLoginCode(row: TelegramLoginCodeRecord | undefined): TelegramLoginCodeRecord | null {
+  if (!row) {
+    return null;
+  }
+  return {
+    ...row,
+    id: Number(row.id),
+    web_user_id: String(row.web_user_id),
+    telegram_user_id: row.telegram_user_id ? String(row.telegram_user_id) : null,
+    status: row.status === "confirmed" || row.status === "expired" ? row.status : "pending",
+  };
+}
+
 function isSameLocalDay(left: Date, right: Date) {
   return (
     left.getFullYear() === right.getFullYear() &&
@@ -251,6 +299,31 @@ export function parseReferralArg(value: unknown) {
   return parseUserId(text);
 }
 
+export function normalizeTelegramLoginCode(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const code = value.trim().replace(/\s+/g, "").toUpperCase();
+  if (!/^[A-Z0-9]{8}$/.test(code)) {
+    return null;
+  }
+  return code;
+}
+
+function telegramLoginCodeHash(code: string) {
+  return createHash("sha256").update(code).digest("hex");
+}
+
+function generateTelegramLoginCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const bytes = randomBytes(8);
+  let code = "";
+  for (const byte of bytes) {
+    code += alphabet[byte % alphabet.length];
+  }
+  return code;
+}
+
 export async function generateUserId() {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const userId = String(randomInt(1_000_000_000_000, 8_999_999_999_999));
@@ -299,6 +372,112 @@ export async function ensureUser(userId: string, username: string | null = "web"
       [userId, username, validReferrer],
     );
     return getUserInClient(client, userId);
+  });
+}
+
+export async function createTelegramLoginCode(webUserId: string) {
+  return withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE telegram_login_codes
+        SET status = 'expired'
+        WHERE web_user_id = $1
+          AND status = 'pending'
+      `,
+      [webUserId],
+    );
+
+    const expiresAt = new Date(Date.now() + TELEGRAM_LOGIN_CODE_TTL_MS);
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const code = generateTelegramLoginCode();
+      const codeHash = telegramLoginCodeHash(code);
+      try {
+        const result = await client.query<TelegramLoginCodeRecord>(
+          `
+            INSERT INTO telegram_login_codes (code_hash, web_user_id, expires_at)
+            VALUES ($1, $2, $3)
+            RETURNING *
+          `,
+          [codeHash, webUserId, expiresAt],
+        );
+        return {
+          code,
+          record: rowToTelegramLoginCode(result.rows[0]),
+        };
+      } catch (error) {
+        if (attempt === 7) {
+          throw error;
+        }
+      }
+    }
+
+    throw new Error("Could not create Telegram login code");
+  });
+}
+
+export async function getTelegramLoginCodeStatus(webUserId: string, code: string) {
+  const normalizedCode = normalizeTelegramLoginCode(code);
+  if (!normalizedCode) {
+    return null;
+  }
+
+  return withTransaction(async (client) => {
+    const result = await client.query<TelegramLoginCodeRecord>(
+      `
+        SELECT *
+        FROM telegram_login_codes
+        WHERE code_hash = $1
+          AND web_user_id = $2
+        FOR UPDATE
+      `,
+      [telegramLoginCodeHash(normalizedCode), webUserId],
+    );
+    const record = rowToTelegramLoginCode(result.rows[0]);
+    if (!record) {
+      return null;
+    }
+
+    if (record.status === "pending" && new Date(record.expires_at).getTime() < Date.now()) {
+      await client.query(
+        `
+          UPDATE telegram_login_codes
+          SET status = 'expired'
+          WHERE id = $1
+        `,
+        [record.id],
+      );
+      return { ...record, status: "expired" as const };
+    }
+
+    if (record.status === "confirmed" && record.telegram_user_id) {
+      await client.query(
+        `
+          INSERT INTO users (user_id, username, created_at, last_activity_at, free_requests_reset_date)
+          VALUES ($1, $2, NOW(), NOW(), NOW())
+          ON CONFLICT (user_id) DO UPDATE
+          SET username = COALESCE($2, users.username),
+              last_activity_at = NOW()
+        `,
+        [record.telegram_user_id, record.telegram_username || "telegram"],
+      );
+
+      const currentUser = await getUserInClient(client, record.web_user_id);
+      const telegramUser = await getUserInClient(client, record.telegram_user_id);
+      if (currentUser?.language_selected && currentUser.language && telegramUser && !telegramUser.language_selected) {
+        await client.query(
+          `
+            UPDATE users
+            SET language = $2,
+                language_selected = TRUE,
+                last_activity_at = NOW()
+            WHERE user_id = $1
+          `,
+          [record.telegram_user_id, currentUser.language],
+        );
+      }
+    }
+
+    return record;
   });
 }
 
