@@ -160,7 +160,6 @@ type TelegramLoginPayload = {
 
 const STORAGE_KEY = "darkgpt_web_user_id";
 const TELEGRAM_ATTEMPT_KEY = "darkgpt_telegram_login_attempt";
-const TELEGRAM_LOGIN_SCRIPT = "https://oauth.telegram.org/js/telegram-login.js?5";
 const TELEGRAM_OAUTH_ORIGIN = "https://oauth.telegram.org";
 
 const sectionIcons = {
@@ -285,29 +284,6 @@ function telegramErrorReason(language: Language, code?: string) {
   return loc.telegramErrorUnknown;
 }
 
-function loadTelegramLoginScript() {
-  return new Promise<void>((resolve, reject) => {
-    if (document.querySelector<HTMLScriptElement>(`script[src="${TELEGRAM_LOGIN_SCRIPT}"]`)) {
-      resolve();
-      return;
-    }
-
-    const existing = document.querySelector<HTMLScriptElement>(`script[src="${TELEGRAM_LOGIN_SCRIPT}"]`);
-    if (existing) {
-      existing.addEventListener("load", () => resolve(), { once: true });
-      existing.addEventListener("error", () => reject(new Error("Telegram Login script failed to load")), { once: true });
-      return;
-    }
-
-    const script = document.createElement("script");
-    script.src = TELEGRAM_LOGIN_SCRIPT;
-    script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("Telegram Login script failed to load"));
-    document.head.appendChild(script);
-  });
-}
-
 function parseTelegramMessageData(value: unknown) {
   if (typeof value === "string") {
     try {
@@ -329,6 +305,7 @@ function openTelegramLoginPopup(clientId: string, language: Language, onAuth: (d
   authUrl.searchParams.set("client_id", clientId);
   authUrl.searchParams.set("redirect_uri", redirectUri);
   authUrl.searchParams.set("scope", "openid profile telegram:bot_access");
+  authUrl.searchParams.set("request_access", "write");
   authUrl.searchParams.set("origin", window.location.origin);
   authUrl.searchParams.set("lang", language);
 
@@ -500,10 +477,6 @@ export default function ChatShell() {
       cancelled = true;
     };
   }, [applyEnvelope]);
-
-  useEffect(() => {
-    void loadTelegramLoginScript().catch(() => undefined);
-  }, []);
 
   const updateUserFromEnvelope = useCallback((data: ApiEnvelope) => {
     applyEnvelope(data);

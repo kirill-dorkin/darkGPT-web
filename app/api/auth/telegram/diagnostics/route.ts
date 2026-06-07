@@ -67,13 +67,13 @@ export async function GET(request: Request) {
     callbackUrl.searchParams.set("currentUserId", currentUserId);
   }
 
-  const sdkUrl = new URL("https://oauth.telegram.org/js/telegram-login.js?5");
   const oauthUrl = new URL("https://oauth.telegram.org/auth");
   if (clientId) {
     oauthUrl.searchParams.set("response_type", "post_message");
     oauthUrl.searchParams.set("client_id", clientId);
     oauthUrl.searchParams.set("redirect_uri", origin);
     oauthUrl.searchParams.set("scope", "openid profile telegram:bot_access");
+    oauthUrl.searchParams.set("request_access", "write");
     oauthUrl.searchParams.set("origin", origin);
   }
 
@@ -135,7 +135,11 @@ export async function GET(request: Request) {
       "write_access",
       text(language, "Доступ Telegram", "Telegram access"),
       "ok",
-      text(language, "Popup URL содержит scope=telegram:bot_access и origin сайта.", "Popup URL contains scope=telegram:bot_access and the site origin."),
+      text(
+        language,
+        "Popup URL содержит request_access=write, scope=telegram:bot_access и origin сайта.",
+        "Popup URL contains request_access=write, scope=telegram:bot_access, and the site origin.",
+      ),
     ),
   );
 
@@ -193,21 +197,8 @@ export async function GET(request: Request) {
 
   if (clientId) {
     try {
-      const { response, body } = await fetchText(sdkUrl.toString());
-      const sdkLoaded = body.includes("Telegram.Login") && body.includes("request_access");
-
-      checks.push(
-        check(
-          "login_sdk",
-          text(language, "Telegram Login SDK", "Telegram Login SDK"),
-          response.ok && sdkLoaded ? "ok" : "error",
-          response.ok && sdkLoaded
-            ? text(language, "telegram-login.js загружается.", "telegram-login.js loads successfully.")
-            : text(language, `telegram-login.js не загрузился корректно. HTTP ${response.status}.`, `telegram-login.js did not load correctly. HTTP ${response.status}.`),
-        ),
-      );
-
       const { response: authResponse, body: authBody } = await fetchText(oauthUrl.toString());
+      const requestUrlIncludesAccess = authBody.includes("request_access=write");
       checks.push(
         check(
           "popup_origin",
@@ -218,6 +209,24 @@ export async function GET(request: Request) {
             : text(language, "Telegram OAuth всё ещё отвечает origin required.", "Telegram OAuth still responds with origin required."),
         ),
       );
+      checks.push(
+        check(
+          "popup_request_access",
+          text(language, "Confirm message", "Confirm message"),
+          authResponse.ok && requestUrlIncludesAccess ? "ok" : "warning",
+          authResponse.ok && requestUrlIncludesAccess
+            ? text(
+                language,
+                "Telegram popup передаст request_access=write во внутренние /auth/request и /auth/login.",
+                "Telegram popup will pass request_access=write to the internal /auth/request and /auth/login calls.",
+              )
+            : text(
+                language,
+                "Telegram popup не показал request_access=write во внутренних запросах.",
+                "Telegram popup did not expose request_access=write in internal requests.",
+              ),
+        ),
+      );
 
       checks.push(
         check(
@@ -226,8 +235,8 @@ export async function GET(request: Request) {
           "warning",
           text(
             language,
-            "Это нельзя проверить сервером. В @BotFather > Bot Settings > Web Login должны быть Allowed URLs: https://dark-gpt-web.vercel.app и https://dark-gpt-web.vercel.app/api/auth/telegram/oidc.",
-            "This cannot be checked server-side. In @BotFather > Bot Settings > Web Login, Allowed URLs must include https://dark-gpt-web.vercel.app and https://dark-gpt-web.vercel.app/api/auth/telegram/oidc.",
+            "Это нельзя проверить сервером. В @BotFather > Bot Settings > Web Login должен быть Allowed URL: https://dark-gpt-web.vercel.app.",
+            "This cannot be checked server-side. In @BotFather > Bot Settings > Web Login, Allowed URL must include https://dark-gpt-web.vercel.app.",
           ),
         ),
       );
@@ -235,11 +244,11 @@ export async function GET(request: Request) {
       checks.push(
         check(
           "oauth_page",
-          text(language, "Telegram Login SDK", "Telegram Login SDK"),
+          text(language, "Telegram OAuth", "Telegram OAuth"),
           "error",
           error instanceof Error
-            ? text(language, `Не удалось загрузить telegram-login.js: ${error.message}.`, `Could not load telegram-login.js: ${error.message}.`)
-            : text(language, "Не удалось загрузить telegram-login.js.", "Could not load telegram-login.js."),
+            ? text(language, `Не удалось загрузить Telegram OAuth: ${error.message}.`, `Could not load Telegram OAuth: ${error.message}.`)
+            : text(language, "Не удалось загрузить Telegram OAuth.", "Could not load Telegram OAuth."),
         ),
       );
     }
@@ -261,8 +270,8 @@ export async function GET(request: Request) {
     summary: ok
       ? text(
           language,
-          "Кнопка использует новый Telegram Login SDK. Если подтверждение всё равно не приходит, проверь BotFather Web Login Allowed URLs.",
-          "The button uses the new Telegram Login SDK. If the confirmation still does not arrive, check BotFather Web Login Allowed URLs.",
+          "Кнопка открывает Telegram OAuth popup с origin и request_access=write. Если подтверждение всё равно не приходит, проверь BotFather Web Login Allowed URLs.",
+          "The button opens Telegram OAuth popup with origin and request_access=write. If the confirmation still does not arrive, check BotFather Web Login Allowed URLs.",
         )
       : text(language, "Есть ошибка в конфигурации Telegram Login. Смотри красную проверку ниже.", "There is a Telegram Login configuration error. See the red check below."),
   };
