@@ -25,7 +25,7 @@ Open `http://localhost:3000`.
 
 ## Telegram Login
 
-Telegram Login uses the official Telegram Login Widget. `BOT_TOKEN` stays server-side and is used to verify Telegram's signed auth payload; `TELEGRAM_BOT_USERNAME` is public and is used by the browser widget.
+Telegram Login uses Telegram's official OAuth redirect flow. `BOT_TOKEN` stays server-side and verifies Telegram's signed auth payload; the public app config exposes only the numeric bot id derived from that token.
 
 ```env
 BOT_TOKEN=...

@@ -1,4 +1,4 @@
-import { randomBytes, randomInt } from "crypto";
+import { randomInt } from "crypto";
 import { Pool, PoolClient, QueryResultRow } from "pg";
 import {
   FREE_REQUESTS_PER_DAY,
@@ -41,16 +41,6 @@ export type PaymentRecord = {
   status: string;
   created_at: Date;
   paid_at: Date | null;
-};
-
-export type WebLoginTokenRecord = {
-  token: string;
-  web_user_id: string;
-  telegram_user_id: string | null;
-  telegram_username: string | null;
-  created_at: Date;
-  expires_at: Date;
-  claimed_at: Date | null;
 };
 
 export type RequestAccess =
@@ -144,25 +134,6 @@ async function ensureSchema() {
           payment_id INTEGER REFERENCES payments(id),
           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
-      `);
-      await db.query(`
-        CREATE TABLE IF NOT EXISTS web_login_tokens (
-          token VARCHAR(64) PRIMARY KEY,
-          web_user_id BIGINT NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
-          telegram_user_id BIGINT REFERENCES users(user_id) ON DELETE SET NULL,
-          telegram_username VARCHAR(255),
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          expires_at TIMESTAMPTZ NOT NULL,
-          claimed_at TIMESTAMPTZ
-        )
-      `);
-      await db.query(`
-        CREATE INDEX IF NOT EXISTS idx_web_login_tokens_web_user_id
-        ON web_login_tokens(web_user_id)
-      `);
-      await db.query(`
-        CREATE INDEX IF NOT EXISTS idx_web_login_tokens_expires_at
-        ON web_login_tokens(expires_at)
       `);
     })();
   }
@@ -288,58 +259,6 @@ export async function generateUserId() {
     }
   }
   return String(Date.now()) + String(randomInt(1000, 9999));
-}
-
-export function parseWebLoginToken(value: unknown) {
-  if (typeof value !== "string") {
-    return null;
-  }
-  const token = value.trim();
-  return /^[a-f0-9]{32}$/i.test(token) ? token.toLowerCase() : null;
-}
-
-export async function createWebLoginToken(webUserId: string) {
-  const token = randomBytes(16).toString("hex");
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-  await withTransaction(async (client) => {
-    await client.query("DELETE FROM web_login_tokens WHERE expires_at <= NOW()");
-    await client.query(
-      `
-        DELETE FROM web_login_tokens
-        WHERE web_user_id = $1
-          AND telegram_user_id IS NULL
-      `,
-      [webUserId],
-    );
-    await client.query(
-      `
-        INSERT INTO web_login_tokens (token, web_user_id, expires_at)
-        VALUES ($1, $2, $3)
-      `,
-      [token, webUserId, expiresAt],
-    );
-  });
-
-  return { token, expiresAt };
-}
-
-export async function getWebLoginToken(token: string) {
-  const result = await query<WebLoginTokenRecord>(
-    `
-      SELECT token,
-             web_user_id::TEXT AS web_user_id,
-             telegram_user_id::TEXT AS telegram_user_id,
-             telegram_username,
-             created_at,
-             expires_at,
-             claimed_at
-      FROM web_login_tokens
-      WHERE token = $1
-    `,
-    [token],
-  );
-  return result.rows[0] || null;
 }
 
 export async function getUser(userId: string) {

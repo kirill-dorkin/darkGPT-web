@@ -43,6 +43,12 @@ export async function refreshedPublicUser(userId: string) {
   return user ? publicUser(user) : null;
 }
 
+function telegramBotId() {
+  const token = process.env.BOT_TOKEN || "";
+  const id = token.split(":")[0] || "";
+  return /^\d+$/.test(id) ? id : "";
+}
+
 export function appConfig(origin?: string) {
   return {
     freeTotal: FREE_REQUESTS_PER_DAY,
@@ -50,6 +56,7 @@ export function appConfig(origin?: string) {
     packages: PACKAGES,
     supportUsername: SUPPORT_USERNAME,
     telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || "dark2_gpt_bot",
+    telegramBotId: telegramBotId(),
     modelTiers: getPublicModelTiers(),
     origin,
   };

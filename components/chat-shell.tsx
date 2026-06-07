@@ -53,6 +53,7 @@ type AppConfig = {
   packages: Record<string, { price: number; credits: number }>;
   supportUsername: string;
   telegramBotUsername: string;
+  telegramBotId: string;
   modelTiers: Array<{
     tier: ModelTier;
     provider: string;
@@ -110,35 +111,7 @@ type PaymentState = {
   message?: string;
 };
 
-type BotLoginState = {
-  token: string;
-  botUrl: string;
-  expiresAt: string;
-};
-
-type TelegramBotLoginResponse = ApiEnvelope & {
-  botLogin?: BotLoginState;
-  status?: "pending" | "connected" | "expired";
-};
-
 const STORAGE_KEY = "darkgpt_web_user_id";
-const BOT_LOGIN_STORAGE_KEY = "darkgpt_web_bot_login";
-
-type TelegramAuthPayload = {
-  id: number | string;
-  first_name?: string;
-  last_name?: string;
-  username?: string;
-  photo_url?: string;
-  auth_date: number | string;
-  hash: string;
-};
-
-declare global {
-  interface Window {
-    __darkgptTelegramAuth?: (user: TelegramAuthPayload) => void;
-  }
-}
 
 const sectionIcons = {
   chat: MessageSquare,
@@ -204,6 +177,18 @@ async function postJson<T>(url: string, body: Record<string, unknown>) {
   return data;
 }
 
+function isValidUserId(value: string | null) {
+  return Boolean(value && /^\d{4,18}$/.test(value));
+}
+
+function clearTelegramLoginQuery() {
+  const url = new URL(window.location.href);
+  for (const key of ["telegramLogin", "telegramUserId", "telegramError"]) {
+    url.searchParams.delete(key);
+  }
+  window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+}
+
 export default function ChatShell() {
   const [user, setUser] = useState<PublicUser | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -217,7 +202,6 @@ export default function ChatShell() {
   const [copied, setCopied] = useState("");
   const [payment, setPayment] = useState<PaymentState | null>(null);
   const [selectedTier, setSelectedTier] = useState<ModelTier>("standard");
-  const [botLogin, setBotLogin] = useState<BotLoginState | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const language: Language = user?.language || "ru";
@@ -249,7 +233,10 @@ export default function ChatShell() {
     async function boot() {
       const params = new URLSearchParams(window.location.search);
       const referralId = params.get("ref") || params.get("start") || "";
-      const storedUserId = window.localStorage.getItem(STORAGE_KEY);
+      const telegramLogin = params.get("telegramLogin");
+      const telegramUserId = params.get("telegramUserId");
+      const returnedUserId = isValidUserId(telegramUserId) ? telegramUserId : "";
+      const storedUserId = returnedUserId || window.localStorage.getItem(STORAGE_KEY);
 
       try {
         const data = await postJson<ApiEnvelope>("/api/session", {
@@ -265,6 +252,14 @@ export default function ChatShell() {
         }
         if (data.user?.language) {
           setMessages(makeInitialMessages(data.user.language));
+        }
+        if (telegramLogin === "success") {
+          setNotice(t(data.user?.language || "ru", "telegramLoggedIn"));
+          setActiveSection(data.user?.languageSelected ? "profile" : "language");
+          clearTelegramLoginQuery();
+        } else if (telegramLogin === "failed") {
+          setNotice(t(data.user?.language || "ru", "telegramAuthFailed"));
+          clearTelegramLoginQuery();
         }
       } catch (error) {
         if (!cancelled) {
@@ -283,153 +278,12 @@ export default function ChatShell() {
     };
   }, [applyEnvelope]);
 
-  useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(BOT_LOGIN_STORAGE_KEY);
-      if (!stored) {
-        return;
-      }
-      const parsed = JSON.parse(stored) as Partial<BotLoginState>;
-      if (
-        typeof parsed.token === "string" &&
-        typeof parsed.botUrl === "string" &&
-        typeof parsed.expiresAt === "string" &&
-        new Date(parsed.expiresAt).getTime() > Date.now()
-      ) {
-        setBotLogin({
-          token: parsed.token,
-          botUrl: parsed.botUrl,
-          expiresAt: parsed.expiresAt,
-        });
-        return;
-      }
-      window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
-    } catch {
-      window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
-    }
-  }, []);
-
   const updateUserFromEnvelope = useCallback((data: ApiEnvelope) => {
     applyEnvelope(data);
     if (data.user?.userId) {
       window.localStorage.setItem(STORAGE_KEY, data.user.userId);
     }
   }, [applyEnvelope]);
-
-  const handleTelegramAuth = useCallback(
-    async (authData: TelegramAuthPayload) => {
-      setIsLoading(true);
-      setNotice("");
-      try {
-        const data = await postJson<ApiEnvelope>("/api/auth/telegram", {
-          authData,
-          currentUserId: user?.userId,
-        });
-        updateUserFromEnvelope(data);
-        if (data.user?.language) {
-          setMessages(makeInitialMessages(data.user.language));
-        }
-        setNotice(t(data.user?.language || language, "telegramLoggedIn"));
-        setActiveSection(data.user?.languageSelected ? "profile" : "language");
-      } catch (error) {
-        setNotice(error instanceof Error ? error.message : t(language, "telegramAuthFailed"));
-      } finally {
-        setIsLoading(false);
-      }
-    },
-    [language, updateUserFromEnvelope, user?.userId],
-  );
-
-  const startTelegramBotLogin = useCallback(async () => {
-    setIsLoading(true);
-    setNotice("");
-    const popup = window.open("about:blank", "_blank");
-    try {
-      if (popup) {
-        popup.opener = null;
-      }
-      const data = await postJson<TelegramBotLoginResponse>("/api/auth/telegram-bot/start", {
-        currentUserId: user?.userId,
-      });
-      updateUserFromEnvelope(data);
-      if (!data.botLogin?.botUrl) {
-        throw new Error(t(language, "telegramAuthFailed"));
-      }
-      setBotLogin(data.botLogin);
-      window.localStorage.setItem(BOT_LOGIN_STORAGE_KEY, JSON.stringify(data.botLogin));
-      if (popup) {
-        popup.location.href = data.botLogin.botUrl;
-      } else {
-        window.open(data.botLogin.botUrl, "_blank", "noopener,noreferrer");
-      }
-      setNotice(t(language, "telegramBotLoginPending"));
-    } catch (error) {
-      if (popup) {
-        popup.close();
-      }
-      setNotice(error instanceof Error ? error.message : t(language, "telegramAuthFailed"));
-    } finally {
-      setIsLoading(false);
-    }
-  }, [language, updateUserFromEnvelope, user?.userId]);
-
-  useEffect(() => {
-    if (!botLogin?.token) {
-      return;
-    }
-
-    const loginToken = botLogin.token;
-    let cancelled = false;
-    let timer: number | undefined;
-
-    async function checkLogin() {
-      try {
-        const data = await postJson<TelegramBotLoginResponse>("/api/auth/telegram-bot/check", {
-          token: loginToken,
-          currentUserId: user?.userId,
-        });
-        if (cancelled) {
-          return;
-        }
-        if (data.status === "connected" && data.user) {
-          setBotLogin(null);
-          window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
-          updateUserFromEnvelope(data);
-          if (data.user.language) {
-            setMessages(makeInitialMessages(data.user.language));
-          }
-          setNotice(t(data.user.language || language, "telegramLoggedIn"));
-          setActiveSection(data.user.languageSelected ? "profile" : "language");
-          return;
-        }
-        if (data.status === "expired") {
-          setBotLogin(null);
-          window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
-          setNotice(t(language, "telegramBotLoginExpired"));
-          return;
-        }
-      } catch {
-        if (!cancelled) {
-          setBotLogin(null);
-          window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
-          setNotice(t(language, "telegramAuthFailed"));
-        }
-        return;
-      }
-
-      if (!cancelled) {
-        timer = window.setTimeout(checkLogin, 2000);
-      }
-    }
-
-    timer = window.setTimeout(checkLogin, 1500);
-    return () => {
-      cancelled = true;
-      if (timer) {
-        window.clearTimeout(timer);
-      }
-    };
-  }, [botLogin?.token, language, updateUserFromEnvelope, user?.userId]);
 
   async function selectLanguage(nextLanguage: Language) {
     if (!user) {
@@ -673,29 +527,11 @@ export default function ChatShell() {
           <div className="mt-5 border-t border-line pt-5">
             <p className="mb-3 text-sm text-slate-600">{loc.telegramLoginHint}</p>
             <TelegramLoginButton
-              botUsername={config?.telegramBotUsername || ""}
+              botId={config?.telegramBotId || ""}
+              origin={origin}
+              currentUserId={user?.userId || ""}
               language={language}
-              onAuth={handleTelegramAuth}
             />
-            <button
-              type="button"
-              onClick={() => void startTelegramBotLogin()}
-              disabled={isLoading || !config?.telegramBotUsername}
-              className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line bg-white text-sm font-semibold transition hover:border-signal disabled:opacity-60"
-            >
-              {botLogin ? <Loader2 size={17} className="animate-spin" /> : <Bot size={17} />}
-              {loc.telegramBotLogin}
-            </button>
-            {botLogin?.botUrl ? (
-              <a
-                href={botLogin.botUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="mt-2 flex h-11 w-full items-center justify-center rounded-md bg-ink px-3 text-sm font-semibold text-white transition hover:bg-slate-800"
-              >
-                {loc.telegramBotLoginOpenAgain}
-              </a>
-            ) : null}
           </div>
           {notice ? <div className="mt-4 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">{notice}</div> : null}
         </section>
@@ -861,12 +697,8 @@ export default function ChatShell() {
             <ProfileView
               user={user}
               language={language}
-              telegramBotUsername={config?.telegramBotUsername || ""}
-              onTelegramAuth={handleTelegramAuth}
-              onTelegramBotLogin={startTelegramBotLogin}
-              botLoginUrl={botLogin?.botUrl || ""}
-              botLoginPending={Boolean(botLogin)}
-              isLoading={isLoading}
+              telegramBotId={config?.telegramBotId || ""}
+              origin={origin}
             />
           ) : null}
 
@@ -908,45 +740,18 @@ function Metric({ label, value, icon }: { label: string; value: string; icon?: R
 }
 
 function TelegramLoginButton({
-  botUsername,
+  botId,
+  origin,
+  currentUserId,
   language,
-  onAuth,
 }: {
-  botUsername: string;
+  botId: string;
+  origin: string;
+  currentUserId: string;
   language: Language;
-  onAuth: (payload: TelegramAuthPayload) => void;
 }) {
-  const containerRef = useRef<HTMLDivElement | null>(null);
   const loc = locale(language);
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container || !botUsername) {
-      return;
-    }
-
-    window.__darkgptTelegramAuth = onAuth;
-    container.innerHTML = "";
-
-    const script = document.createElement("script");
-    script.async = true;
-    script.src = "https://telegram.org/js/telegram-widget.js?22";
-    script.dataset.telegramLogin = botUsername;
-    script.dataset.size = "large";
-    script.dataset.radius = "8";
-    script.dataset.requestAccess = "write";
-    script.dataset.onauth = "__darkgptTelegramAuth(user)";
-    container.appendChild(script);
-
-    return () => {
-      container.innerHTML = "";
-      if (window.__darkgptTelegramAuth === onAuth) {
-        delete window.__darkgptTelegramAuth;
-      }
-    };
-  }, [botUsername, onAuth]);
-
-  if (!botUsername) {
+  if (!botId || !origin) {
     return (
       <div className="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
         {loc.telegramUnavailable}
@@ -954,7 +759,26 @@ function TelegramLoginButton({
     );
   }
 
-  return <div ref={containerRef} className="min-h-[42px]" aria-label={loc.telegramLogin} />;
+  const returnTo = new URL("/api/auth/telegram/callback", origin);
+  if (currentUserId) {
+    returnTo.searchParams.set("currentUserId", currentUserId);
+  }
+
+  const telegramUrl = new URL("https://oauth.telegram.org/auth");
+  telegramUrl.searchParams.set("bot_id", botId);
+  telegramUrl.searchParams.set("origin", origin);
+  telegramUrl.searchParams.set("return_to", returnTo.toString());
+  telegramUrl.searchParams.set("request_access", "write");
+
+  return (
+    <a
+      href={telegramUrl.toString()}
+      className="flex h-11 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
+    >
+      <Send size={17} />
+      {loc.telegramLogin}
+    </a>
+  );
 }
 
 function ChatView({
@@ -1329,21 +1153,13 @@ function ReferralView({
 function ProfileView({
   user,
   language,
-  telegramBotUsername,
-  onTelegramAuth,
-  onTelegramBotLogin,
-  botLoginUrl,
-  botLoginPending,
-  isLoading,
+  telegramBotId,
+  origin,
 }: {
   user: PublicUser;
   language: Language;
-  telegramBotUsername: string;
-  onTelegramAuth: (payload: TelegramAuthPayload) => void;
-  onTelegramBotLogin: () => Promise<void>;
-  botLoginUrl: string;
-  botLoginPending: boolean;
-  isLoading: boolean;
+  telegramBotId: string;
+  origin: string;
 }) {
   const loc = locale(language);
   const langName = language === "ru" ? loc.russian : loc.english;
@@ -1369,26 +1185,7 @@ function ProfileView({
             {loc.telegramLogin}
           </div>
           <p className="mb-3 text-sm text-slate-700">{loc.telegramLoginHint}</p>
-          <TelegramLoginButton botUsername={telegramBotUsername} language={language} onAuth={onTelegramAuth} />
-          <button
-            type="button"
-            onClick={() => void onTelegramBotLogin()}
-            disabled={isLoading || !telegramBotUsername}
-            className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line bg-white text-sm font-semibold transition hover:border-signal disabled:opacity-60"
-          >
-            {botLoginPending ? <Loader2 size={17} className="animate-spin" /> : <Bot size={17} />}
-            {loc.telegramBotLogin}
-          </button>
-          {botLoginUrl ? (
-            <a
-              href={botLoginUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-2 flex h-11 w-full items-center justify-center rounded-md bg-ink px-3 text-sm font-semibold text-white transition hover:bg-slate-800"
-            >
-              {loc.telegramBotLoginOpenAgain}
-            </a>
-          ) : null}
+          <TelegramLoginButton botId={telegramBotId} origin={origin} currentUserId={user.userId} language={language} />
         </section>
       </div>
     </div>
