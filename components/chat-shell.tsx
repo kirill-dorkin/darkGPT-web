@@ -122,6 +122,7 @@ type TelegramBotLoginResponse = ApiEnvelope & {
 };
 
 const STORAGE_KEY = "darkgpt_web_user_id";
+const BOT_LOGIN_STORAGE_KEY = "darkgpt_web_bot_login";
 
 type TelegramAuthPayload = {
   id: number | string;
@@ -282,6 +283,32 @@ export default function ChatShell() {
     };
   }, [applyEnvelope]);
 
+  useEffect(() => {
+    try {
+      const stored = window.localStorage.getItem(BOT_LOGIN_STORAGE_KEY);
+      if (!stored) {
+        return;
+      }
+      const parsed = JSON.parse(stored) as Partial<BotLoginState>;
+      if (
+        typeof parsed.token === "string" &&
+        typeof parsed.botUrl === "string" &&
+        typeof parsed.expiresAt === "string" &&
+        new Date(parsed.expiresAt).getTime() > Date.now()
+      ) {
+        setBotLogin({
+          token: parsed.token,
+          botUrl: parsed.botUrl,
+          expiresAt: parsed.expiresAt,
+        });
+        return;
+      }
+      window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
+    } catch {
+      window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
+    }
+  }, []);
+
   const updateUserFromEnvelope = useCallback((data: ApiEnvelope) => {
     applyEnvelope(data);
     if (data.user?.userId) {
@@ -329,6 +356,7 @@ export default function ChatShell() {
         throw new Error(t(language, "telegramAuthFailed"));
       }
       setBotLogin(data.botLogin);
+      window.localStorage.setItem(BOT_LOGIN_STORAGE_KEY, JSON.stringify(data.botLogin));
       if (popup) {
         popup.location.href = data.botLogin.botUrl;
       } else {
@@ -365,6 +393,7 @@ export default function ChatShell() {
         }
         if (data.status === "connected" && data.user) {
           setBotLogin(null);
+          window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
           updateUserFromEnvelope(data);
           if (data.user.language) {
             setMessages(makeInitialMessages(data.user.language));
@@ -375,12 +404,14 @@ export default function ChatShell() {
         }
         if (data.status === "expired") {
           setBotLogin(null);
+          window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
           setNotice(t(language, "telegramBotLoginExpired"));
           return;
         }
       } catch {
         if (!cancelled) {
           setBotLogin(null);
+          window.localStorage.removeItem(BOT_LOGIN_STORAGE_KEY);
           setNotice(t(language, "telegramAuthFailed"));
         }
         return;
@@ -655,6 +686,16 @@ export default function ChatShell() {
               {botLogin ? <Loader2 size={17} className="animate-spin" /> : <Bot size={17} />}
               {loc.telegramBotLogin}
             </button>
+            {botLogin?.botUrl ? (
+              <a
+                href={botLogin.botUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="mt-2 flex h-11 w-full items-center justify-center rounded-md bg-ink px-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+              >
+                {loc.telegramBotLoginOpenAgain}
+              </a>
+            ) : null}
           </div>
           {notice ? <div className="mt-4 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">{notice}</div> : null}
         </section>
@@ -823,6 +864,7 @@ export default function ChatShell() {
               telegramBotUsername={config?.telegramBotUsername || ""}
               onTelegramAuth={handleTelegramAuth}
               onTelegramBotLogin={startTelegramBotLogin}
+              botLoginUrl={botLogin?.botUrl || ""}
               botLoginPending={Boolean(botLogin)}
               isLoading={isLoading}
             />
@@ -1290,6 +1332,7 @@ function ProfileView({
   telegramBotUsername,
   onTelegramAuth,
   onTelegramBotLogin,
+  botLoginUrl,
   botLoginPending,
   isLoading,
 }: {
@@ -1298,6 +1341,7 @@ function ProfileView({
   telegramBotUsername: string;
   onTelegramAuth: (payload: TelegramAuthPayload) => void;
   onTelegramBotLogin: () => Promise<void>;
+  botLoginUrl: string;
   botLoginPending: boolean;
   isLoading: boolean;
 }) {
@@ -1335,6 +1379,16 @@ function ProfileView({
             {botLoginPending ? <Loader2 size={17} className="animate-spin" /> : <Bot size={17} />}
             {loc.telegramBotLogin}
           </button>
+          {botLoginUrl ? (
+            <a
+              href={botLoginUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-2 flex h-11 w-full items-center justify-center rounded-md bg-ink px-3 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              {loc.telegramBotLoginOpenAgain}
+            </a>
+          ) : null}
         </section>
       </div>
     </div>
