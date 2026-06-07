@@ -90,6 +90,12 @@ const LOCALES = {
     startingNotice: "DarkGPT запускает модель. Ответ может занять до минуты.",
     demoWelcome:
       "Готов. Пиши задачу, а я отвечу структурно: план, код, текст, таблица или чеклист.",
+    telegramLogin: "Войти через Telegram",
+    telegramLoginHint: "Вход привяжет профиль к Telegram ID и откроет подтверждение в Telegram.",
+    telegramLoggedIn: "Telegram подключён",
+    telegramUnavailable: "Telegram Login не настроен",
+    telegramAuthFailed: "Не удалось войти через Telegram.",
+    account: "Аккаунт",
   },
   en: {
     languageFirstRun: "Choose your interface language.\nВыберите язык интерфейса.",
@@ -175,6 +181,12 @@ const LOCALES = {
     startingNotice: "DarkGPT is starting the model. The answer may take up to a minute.",
     demoWelcome:
       "Ready. Send a task and I will answer with a plan, code, text, table, or checklist.",
+    telegramLogin: "Log in with Telegram",
+    telegramLoginHint: "Login links the profile to your Telegram ID and opens a confirmation in Telegram.",
+    telegramLoggedIn: "Telegram connected",
+    telegramUnavailable: "Telegram Login is not configured",
+    telegramAuthFailed: "Could not log in with Telegram.",
+    account: "Account",
   },
 } as const satisfies Record<Language, LocaleValues>;
 

@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 import { FREE_REQUESTS_PER_DAY, PACKAGES, REQUEST_COST, SUPPORT_USERNAME, type Language } from "@/lib/constants";
 import { UserRecord, checkAndResetDailyRequests, freeLeft, getUser } from "@/lib/db";
+import { getPublicModelTiers } from "@/lib/model-router";
 
 export type PublicUser = {
   userId: string;
+  username: string | null;
   language: Language | null;
   languageSelected: boolean;
   freeUsedToday: number;
@@ -20,6 +22,7 @@ export type PublicUser = {
 export function publicUser(user: UserRecord): PublicUser {
   return {
     userId: user.user_id,
+    username: user.username,
     language: user.language,
     languageSelected: user.language_selected,
     freeUsedToday: user.free_requests_used_today,
@@ -46,6 +49,8 @@ export function appConfig(origin?: string) {
     requestCost: REQUEST_COST,
     packages: PACKAGES,
     supportUsername: SUPPORT_USERNAME,
+    telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || "",
+    modelTiers: getPublicModelTiers(),
     origin,
   };
 }

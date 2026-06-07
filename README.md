@@ -1,6 +1,6 @@
 # DarkGPT Web
 
-Standalone Next.js web interface for DarkGPT. The web app mirrors the Telegram bot flow: RU/EN language selection, 3 free requests per day, credit balance, Crypto Bot top-ups, referrals, profile, and support links.
+Standalone Next.js web interface for DarkGPT. The web app mirrors the Telegram bot flow: Telegram login, RU/EN language selection, 3 free requests per day, credit balance, Crypto Bot top-ups, referrals, profile, and support links.
 
 ## Stack
 
@@ -23,15 +23,26 @@ Open `http://localhost:3000`.
 
 `DATABASE_URL` is required for runtime API routes. Use the same pooled PostgreSQL/Neon database as the bot, or a compatible PostgreSQL database. The web app creates missing tables with the bot-compatible schema if they do not exist.
 
+## Telegram Login
+
+Telegram Login uses the official Telegram Login Widget. `BOT_TOKEN` stays server-side and is used to verify Telegram's signed auth payload; `TELEGRAM_BOT_USERNAME` is public and is used by the browser widget.
+
+```env
+BOT_TOKEN=...
+TELEGRAM_BOT_USERNAME=dark2_gpt_bot
+```
+
 ## Gemini Env
 
 ```env
 DATABASE_URL=postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require
 AI_PROVIDER=gemini
-AI_STANDARD_MODEL=gemini-2.5-flash-lite
+AI_STANDARD_MODEL=gemini-2.5-flash
+AI_STANDARD_FALLBACK_MODELS=gemini-2.5-flash-lite,gemini-2.5-pro
 GEMINI_API_KEY=...
 GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
 GEMINI_REASONING_EFFORT=none
+GEMINI_FALLBACK_MODELS=gemini-2.5-flash,gemini-2.5-pro
 AI_TIMEOUT_SECONDS=45
 AI_MAX_OUTPUT_TOKENS=700
 ```
@@ -65,10 +76,12 @@ CRYPTO_PAY_BASE_URL=https://testnet-pay.crypt.bot/api
 ## Runtime Flow
 
 - Browser stores an anonymous web account ID in `localStorage`.
+- Telegram Login switches the session to the verified Telegram user ID.
 - Referral links use `?ref=<user_id>`.
 - Credits are charged only after a successful AI response.
 - Free daily requests reset automatically by date.
 - Paid invoices are checked through `/api/payments/check` and processed idempotently.
+- Gemini requests can use tier selection and automatic fallback models when a model hits rate limits.
 
 ## Git Remote
 

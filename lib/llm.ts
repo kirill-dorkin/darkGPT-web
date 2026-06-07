@@ -21,6 +21,11 @@ type ProviderConfig = {
   replicateVersion: string;
 };
 
+type CompletionResult = {
+  text: string;
+  model: string;
+};
+
 type ChatCompletionResponse = {
   choices?: Array<{
     message?: {
@@ -95,7 +100,12 @@ function apiKeyForProvider(provider: string) {
 function getProviderConfig(tier?: string | null): ProviderConfig {
   const profile = getModelProfile(tier);
   const provider = profile.provider.toLowerCase();
-  const fallbackModels = (env("LLM_FALLBACK_MODELS") || env("OPENROUTER_FALLBACK_MODELS"))
+  const fallbackModels = (
+    env(`AI_${profile.tier.toUpperCase()}_FALLBACK_MODELS`) ||
+    env("GEMINI_FALLBACK_MODELS") ||
+    env("LLM_FALLBACK_MODELS") ||
+    env("OPENROUTER_FALLBACK_MODELS")
+  )
     .split(",")
     .map((value) => value.trim())
     .filter((value) => value && value !== profile.model);
@@ -105,7 +115,7 @@ function getProviderConfig(tier?: string | null): ProviderConfig {
     baseUrl: openAiBaseUrlForProvider(provider, profile.runpodEndpointId).replace(/\/+$/, ""),
     apiKey: apiKeyForProvider(provider),
     model: profile.model,
-    fallbackModels: provider === "openrouter" ? fallbackModels : [],
+    fallbackModels,
     timeoutMs: intEnv("AI_TIMEOUT_SECONDS", 45) * 1000,
     maxTokens: profile.maxTokens,
     reasoningEffort: env("GEMINI_REASONING_EFFORT"),
@@ -154,6 +164,25 @@ function errorMessage(data: ChatCompletionResponse, fallback: string) {
   return data.error?.message || fallback;
 }
 
+class LLMRequestError extends Error {
+  status: number;
+  code: string;
+
+  constructor(message: string, status: number, code = "provider_error") {
+    super(message);
+    this.name = "LLMRequestError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
+function isRetryableProviderError(error: unknown) {
+  if (!(error instanceof LLMRequestError)) {
+    return false;
+  }
+  return error.status === 408 || error.status === 409 || error.status === 429 || error.status >= 500;
+}
+
 function demoResponse(userMessage: string) {
   return [
     "Demo answer for:",
@@ -180,7 +209,7 @@ async function fetchJson(url: string, init: RequestInit, timeoutMs: number) {
   }
 }
 
-async function createOpenAiCompatibleCompletion(config: ProviderConfig, userMessage: string) {
+async function requestOpenAiCompatibleModel(config: ProviderConfig, userMessage: string, model: string) {
   if (!config.apiKey) {
     throw new Error(`${config.provider} API key is not configured`);
   }
@@ -199,11 +228,7 @@ async function createOpenAiCompatibleCompletion(config: ProviderConfig, userMess
     temperature: 0.7,
   };
 
-  if (config.fallbackModels.length) {
-    payload.models = [config.model, ...config.fallbackModels];
-  } else {
-    payload.model = config.model;
-  }
+  payload.model = model;
 
   if (config.provider === "gemini" && config.reasoningEffort) {
     payload.reasoning_effort = config.reasoningEffort;
@@ -233,17 +258,36 @@ async function createOpenAiCompatibleCompletion(config: ProviderConfig, userMess
   );
 
   if (!response.ok || data.error) {
-    throw new Error(errorMessage(data, `LLM request failed with ${response.status}`));
+    throw new LLMRequestError(errorMessage(data, `LLM request failed with ${response.status}`), response.status);
   }
 
   const text = extractText(data);
   if (!text) {
-    throw new Error("LLM returned empty response");
+    throw new LLMRequestError("LLM returned empty response", response.status, "empty_response");
   }
   return text;
 }
 
-async function createReplicateCompletion(config: ProviderConfig, userMessage: string) {
+async function createOpenAiCompatibleCompletion(config: ProviderConfig, userMessage: string): Promise<CompletionResult> {
+  const models = [config.model, ...config.fallbackModels.filter((model) => model !== config.model)];
+  let lastError: unknown = null;
+
+  for (const model of models) {
+    try {
+      const text = await requestOpenAiCompatibleModel(config, userMessage, model);
+      return { text, model };
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableProviderError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error("LLM request failed");
+}
+
+async function createReplicateCompletion(config: ProviderConfig, userMessage: string): Promise<CompletionResult> {
   if (!config.apiKey || !config.replicateVersion) {
     throw new Error("Replicate is not configured");
   }
@@ -281,7 +325,7 @@ async function createReplicateCompletion(config: ProviderConfig, userMessage: st
   if (!text) {
     throw new Error("Replicate returned empty response");
   }
-  return text;
+  return { text, model: config.model };
 }
 
 export async function createChatCompletion(userMessage: string, tier?: string | null) {
@@ -296,15 +340,15 @@ export async function createChatCompletion(userMessage: string, tier?: string | 
     };
   }
 
-  const text =
+  const result =
     config.provider === "replicate"
       ? await createReplicateCompletion(config, userMessage)
       : await createOpenAiCompatibleCompletion(config, userMessage);
 
   return {
-    text,
+    text: result.text,
     provider: config.provider,
-    model: config.model,
+    model: result.model,
     tier: config.tier,
   };
 }

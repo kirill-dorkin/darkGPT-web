@@ -29,9 +29,11 @@ import { locale, t } from "@/lib/locales";
 
 type Language = "ru" | "en";
 type Section = "chat" | "balance" | "referral" | "profile" | "language" | "help";
+type ModelTier = "lite" | "standard" | "reasoning";
 
 type PublicUser = {
   userId: string;
+  username: string | null;
   language: Language | null;
   languageSelected: boolean;
   freeUsedToday: number;
@@ -50,6 +52,14 @@ type AppConfig = {
   requestCost: number;
   packages: Record<string, { price: number; credits: number }>;
   supportUsername: string;
+  telegramBotUsername: string;
+  modelTiers: Array<{
+    tier: ModelTier;
+    provider: string;
+    model: string;
+    credits: number;
+    maxTokens: number;
+  }>;
   origin?: string;
 };
 
@@ -101,6 +111,22 @@ type PaymentState = {
 };
 
 const STORAGE_KEY = "darkgpt_web_user_id";
+
+type TelegramAuthPayload = {
+  id: number | string;
+  first_name?: string;
+  last_name?: string;
+  username?: string;
+  photo_url?: string;
+  auth_date: number | string;
+  hash: string;
+};
+
+declare global {
+  interface Window {
+    __darkgptTelegramAuth?: (user: TelegramAuthPayload) => void;
+  }
+}
 
 const sectionIcons = {
   chat: MessageSquare,
@@ -178,6 +204,7 @@ export default function ChatShell() {
   const [notice, setNotice] = useState("");
   const [copied, setCopied] = useState("");
   const [payment, setPayment] = useState<PaymentState | null>(null);
+  const [selectedTier, setSelectedTier] = useState<ModelTier>("standard");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const language: Language = user?.language || "ru";
@@ -243,12 +270,36 @@ export default function ChatShell() {
     };
   }, [applyEnvelope]);
 
-  function updateUserFromEnvelope(data: ApiEnvelope) {
+  const updateUserFromEnvelope = useCallback((data: ApiEnvelope) => {
     applyEnvelope(data);
     if (data.user?.userId) {
       window.localStorage.setItem(STORAGE_KEY, data.user.userId);
     }
-  }
+  }, [applyEnvelope]);
+
+  const handleTelegramAuth = useCallback(
+    async (authData: TelegramAuthPayload) => {
+      setIsLoading(true);
+      setNotice("");
+      try {
+        const data = await postJson<ApiEnvelope>("/api/auth/telegram", {
+          authData,
+          currentUserId: user?.userId,
+        });
+        updateUserFromEnvelope(data);
+        if (data.user?.language) {
+          setMessages(makeInitialMessages(data.user.language));
+        }
+        setNotice(t(data.user?.language || language, "telegramLoggedIn"));
+        setActiveSection(data.user?.languageSelected ? "profile" : "language");
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : t(language, "telegramAuthFailed"));
+      } finally {
+        setIsLoading(false);
+      }
+    },
+    [language, updateUserFromEnvelope, user?.userId],
+  );
 
   async function selectLanguage(nextLanguage: Language) {
     if (!user) {
@@ -294,6 +345,7 @@ export default function ChatShell() {
       const data = await postJson<ChatResponse>("/api/chat", {
         userId: user.userId,
         message: trimmed,
+        tier: selectedTier,
       });
       updateUserFromEnvelope(data);
 
@@ -488,6 +540,14 @@ export default function ChatShell() {
               English
             </button>
           </div>
+          <div className="mt-5 border-t border-line pt-5">
+            <p className="mb-3 text-sm text-slate-600">{loc.telegramLoginHint}</p>
+            <TelegramLoginButton
+              botUsername={config?.telegramBotUsername || ""}
+              language={language}
+              onAuth={handleTelegramAuth}
+            />
+          </div>
           {notice ? <div className="mt-4 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">{notice}</div> : null}
         </section>
       </main>
@@ -618,6 +678,9 @@ export default function ChatShell() {
               onSubmit={handleSubmit}
               onSend={sendMessage}
               onCopy={copyText}
+              selectedTier={selectedTier}
+              modelTiers={config?.modelTiers || []}
+              onTierChange={setSelectedTier}
             />
           ) : null}
 
@@ -645,7 +708,14 @@ export default function ChatShell() {
             />
           ) : null}
 
-          {activeSection === "profile" ? <ProfileView user={user} language={language} /> : null}
+          {activeSection === "profile" ? (
+            <ProfileView
+              user={user}
+              language={language}
+              telegramBotUsername={config?.telegramBotUsername || ""}
+              onTelegramAuth={handleTelegramAuth}
+            />
+          ) : null}
 
           {activeSection === "language" ? (
             <LanguageView language={language} isLoading={isLoading} onSelect={selectLanguage} />
@@ -684,6 +754,56 @@ function Metric({ label, value, icon }: { label: string; value: string; icon?: R
   );
 }
 
+function TelegramLoginButton({
+  botUsername,
+  language,
+  onAuth,
+}: {
+  botUsername: string;
+  language: Language;
+  onAuth: (payload: TelegramAuthPayload) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const loc = locale(language);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || !botUsername) {
+      return;
+    }
+
+    window.__darkgptTelegramAuth = onAuth;
+    container.innerHTML = "";
+
+    const script = document.createElement("script");
+    script.async = true;
+    script.src = "https://telegram.org/js/telegram-widget.js?22";
+    script.dataset.telegramLogin = botUsername;
+    script.dataset.size = "large";
+    script.dataset.radius = "8";
+    script.dataset.requestAccess = "write";
+    script.dataset.onauth = "__darkgptTelegramAuth(user)";
+    container.appendChild(script);
+
+    return () => {
+      container.innerHTML = "";
+      if (window.__darkgptTelegramAuth === onAuth) {
+        delete window.__darkgptTelegramAuth;
+      }
+    };
+  }, [botUsername, onAuth]);
+
+  if (!botUsername) {
+    return (
+      <div className="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
+        {loc.telegramUnavailable}
+      </div>
+    );
+  }
+
+  return <div ref={containerRef} className="min-h-[42px]" aria-label={loc.telegramLogin} />;
+}
+
 function ChatView({
   messages,
   input,
@@ -695,6 +815,9 @@ function ChatView({
   onSubmit,
   onSend,
   onCopy,
+  selectedTier,
+  modelTiers,
+  onTierChange,
 }: {
   messages: ChatMessage[];
   input: string;
@@ -706,6 +829,9 @@ function ChatView({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onSend: (value?: string) => Promise<void>;
   onCopy: (text: string, label: string) => Promise<void>;
+  selectedTier: ModelTier;
+  modelTiers: AppConfig["modelTiers"];
+  onTierChange: (tier: ModelTier) => void;
 }) {
   const loc = locale(language);
   return (
@@ -738,6 +864,27 @@ function ChatView({
       </div>
 
       <form onSubmit={onSubmit} className="border-t border-line bg-panel p-3 sm:p-4">
+        {modelTiers.length ? (
+          <div className="mx-auto mb-2 flex max-w-4xl gap-2 overflow-x-auto">
+            {modelTiers.map((tier) => (
+              <button
+                key={tier.tier}
+                type="button"
+                onClick={() => onTierChange(tier.tier)}
+                className={clsx(
+                  "shrink-0 rounded-md border px-3 py-2 text-left text-xs transition",
+                  selectedTier === tier.tier
+                    ? "border-ink bg-ink text-white"
+                    : "border-line bg-white text-slate-700 hover:border-signal",
+                )}
+                title={`${tier.provider} / ${tier.model}`}
+              >
+                <span className="block font-semibold capitalize">{tier.tier}</span>
+                <span className="block max-w-44 truncate opacity-80">{tier.model}</span>
+              </button>
+            ))}
+          </div>
+        ) : null}
         <div className="mx-auto flex max-w-4xl gap-2 rounded-lg border border-line bg-white p-2 shadow-sm">
           <textarea
             ref={textareaRef}
@@ -1026,15 +1173,27 @@ function ReferralView({
   );
 }
 
-function ProfileView({ user, language }: { user: PublicUser; language: Language }) {
+function ProfileView({
+  user,
+  language,
+  telegramBotUsername,
+  onTelegramAuth,
+}: {
+  user: PublicUser;
+  language: Language;
+  telegramBotUsername: string;
+  onTelegramAuth: (payload: TelegramAuthPayload) => void;
+}) {
   const loc = locale(language);
   const langName = language === "ru" ? loc.russian : loc.english;
+  const telegramName = user.username && user.username !== "web" ? `@${user.username.replace(/^@/, "")}` : loc.telegramUnavailable;
   return (
     <div className="flex-1 overflow-y-auto bg-white px-4 py-5 sm:px-6">
       <div className="mx-auto max-w-4xl space-y-5">
         <h2 className="text-lg font-semibold">{loc.profileTitle}</h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           <Stat label={loc.userId} value={user.userId} icon={<User size={18} />} />
+          <Stat label={loc.account} value={telegramName} icon={<Bot size={18} />} />
           <Stat label={loc.interfaceLanguage} value={langName} icon={<Languages size={18} />} />
           <Stat label={loc.currentBalance} value={`${formatNumber(user.balance, language)} ${loc.credits}`} icon={<Wallet size={18} />} />
           <Stat label={loc.freeToday} value={`${formatNumber(user.freeLeft, language)}/${user.freeTotal}`} icon={<Zap size={18} />} />
@@ -1043,6 +1202,14 @@ function ProfileView({ user, language }: { user: PublicUser; language: Language 
           <Stat label={loc.totalPurchased} value={formatNumber(user.totalPurchased, language)} icon={<Wallet size={18} />} />
           <Stat label={loc.totalSpent} value={formatNumber(user.totalSpent, language)} icon={<CreditCard size={18} />} />
         </div>
+        <section className="rounded-lg border border-line bg-panel p-4">
+          <div className="mb-2 flex items-center gap-2 font-semibold">
+            <Bot size={18} />
+            {loc.telegramLogin}
+          </div>
+          <p className="mb-3 text-sm text-slate-700">{loc.telegramLoginHint}</p>
+          <TelegramLoginButton botUsername={telegramBotUsername} language={language} onAuth={onTelegramAuth} />
+        </section>
       </div>
     </div>
   );

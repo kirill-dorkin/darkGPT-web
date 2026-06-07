@@ -82,3 +82,16 @@ export function getModelProfile(tier?: string | null): ModelProfile {
 export function usesRemoteProvider(tier?: string | null) {
   return REMOTE_PROVIDERS.has(getModelProfile(tier).provider);
 }
+
+export function getPublicModelTiers() {
+  return MODEL_TIERS.map((tier) => {
+    const profile = getModelProfile(tier);
+    return {
+      tier,
+      provider: profile.provider,
+      model: profile.model,
+      credits: profile.credits,
+      maxTokens: profile.maxTokens,
+    };
+  });
+}
