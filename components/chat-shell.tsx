@@ -110,6 +110,17 @@ type PaymentState = {
   message?: string;
 };
 
+type BotLoginState = {
+  token: string;
+  botUrl: string;
+  expiresAt: string;
+};
+
+type TelegramBotLoginResponse = ApiEnvelope & {
+  botLogin?: BotLoginState;
+  status?: "pending" | "connected" | "expired";
+};
+
 const STORAGE_KEY = "darkgpt_web_user_id";
 
 type TelegramAuthPayload = {
@@ -205,6 +216,7 @@ export default function ChatShell() {
   const [copied, setCopied] = useState("");
   const [payment, setPayment] = useState<PaymentState | null>(null);
   const [selectedTier, setSelectedTier] = useState<ModelTier>("standard");
+  const [botLogin, setBotLogin] = useState<BotLoginState | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const language: Language = user?.language || "ru";
@@ -300,6 +312,93 @@ export default function ChatShell() {
     },
     [language, updateUserFromEnvelope, user?.userId],
   );
+
+  const startTelegramBotLogin = useCallback(async () => {
+    setIsLoading(true);
+    setNotice("");
+    const popup = window.open("about:blank", "_blank");
+    try {
+      if (popup) {
+        popup.opener = null;
+      }
+      const data = await postJson<TelegramBotLoginResponse>("/api/auth/telegram-bot/start", {
+        currentUserId: user?.userId,
+      });
+      updateUserFromEnvelope(data);
+      if (!data.botLogin?.botUrl) {
+        throw new Error(t(language, "telegramAuthFailed"));
+      }
+      setBotLogin(data.botLogin);
+      if (popup) {
+        popup.location.href = data.botLogin.botUrl;
+      } else {
+        window.open(data.botLogin.botUrl, "_blank", "noopener,noreferrer");
+      }
+      setNotice(t(language, "telegramBotLoginPending"));
+    } catch (error) {
+      if (popup) {
+        popup.close();
+      }
+      setNotice(error instanceof Error ? error.message : t(language, "telegramAuthFailed"));
+    } finally {
+      setIsLoading(false);
+    }
+  }, [language, updateUserFromEnvelope, user?.userId]);
+
+  useEffect(() => {
+    if (!botLogin?.token) {
+      return;
+    }
+
+    const loginToken = botLogin.token;
+    let cancelled = false;
+    let timer: number | undefined;
+
+    async function checkLogin() {
+      try {
+        const data = await postJson<TelegramBotLoginResponse>("/api/auth/telegram-bot/check", {
+          token: loginToken,
+          currentUserId: user?.userId,
+        });
+        if (cancelled) {
+          return;
+        }
+        if (data.status === "connected" && data.user) {
+          setBotLogin(null);
+          updateUserFromEnvelope(data);
+          if (data.user.language) {
+            setMessages(makeInitialMessages(data.user.language));
+          }
+          setNotice(t(data.user.language || language, "telegramLoggedIn"));
+          setActiveSection(data.user.languageSelected ? "profile" : "language");
+          return;
+        }
+        if (data.status === "expired") {
+          setBotLogin(null);
+          setNotice(t(language, "telegramBotLoginExpired"));
+          return;
+        }
+      } catch {
+        if (!cancelled) {
+          setBotLogin(null);
+          setNotice(t(language, "telegramAuthFailed"));
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        timer = window.setTimeout(checkLogin, 2000);
+      }
+    }
+
+    timer = window.setTimeout(checkLogin, 1500);
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [botLogin?.token, language, updateUserFromEnvelope, user?.userId]);
 
   async function selectLanguage(nextLanguage: Language) {
     if (!user) {
@@ -547,6 +646,15 @@ export default function ChatShell() {
               language={language}
               onAuth={handleTelegramAuth}
             />
+            <button
+              type="button"
+              onClick={() => void startTelegramBotLogin()}
+              disabled={isLoading || !config?.telegramBotUsername}
+              className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line bg-white text-sm font-semibold transition hover:border-signal disabled:opacity-60"
+            >
+              {botLogin ? <Loader2 size={17} className="animate-spin" /> : <Bot size={17} />}
+              {loc.telegramBotLogin}
+            </button>
           </div>
           {notice ? <div className="mt-4 rounded-md border border-orange-200 bg-orange-50 p-3 text-sm text-orange-800">{notice}</div> : null}
         </section>
@@ -714,6 +822,9 @@ export default function ChatShell() {
               language={language}
               telegramBotUsername={config?.telegramBotUsername || ""}
               onTelegramAuth={handleTelegramAuth}
+              onTelegramBotLogin={startTelegramBotLogin}
+              botLoginPending={Boolean(botLogin)}
+              isLoading={isLoading}
             />
           ) : null}
 
@@ -1178,11 +1289,17 @@ function ProfileView({
   language,
   telegramBotUsername,
   onTelegramAuth,
+  onTelegramBotLogin,
+  botLoginPending,
+  isLoading,
 }: {
   user: PublicUser;
   language: Language;
   telegramBotUsername: string;
   onTelegramAuth: (payload: TelegramAuthPayload) => void;
+  onTelegramBotLogin: () => Promise<void>;
+  botLoginPending: boolean;
+  isLoading: boolean;
 }) {
   const loc = locale(language);
   const langName = language === "ru" ? loc.russian : loc.english;
@@ -1209,6 +1326,15 @@ function ProfileView({
           </div>
           <p className="mb-3 text-sm text-slate-700">{loc.telegramLoginHint}</p>
           <TelegramLoginButton botUsername={telegramBotUsername} language={language} onAuth={onTelegramAuth} />
+          <button
+            type="button"
+            onClick={() => void onTelegramBotLogin()}
+            disabled={isLoading || !telegramBotUsername}
+            className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-md border border-line bg-white text-sm font-semibold transition hover:border-signal disabled:opacity-60"
+          >
+            {botLoginPending ? <Loader2 size={17} className="animate-spin" /> : <Bot size={17} />}
+            {loc.telegramBotLogin}
+          </button>
         </section>
       </div>
     </div>

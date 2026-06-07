@@ -91,7 +91,10 @@ const LOCALES = {
     demoWelcome:
       "Готов. Пиши задачу, а я отвечу структурно: план, код, текст, таблица или чеклист.",
     telegramLogin: "Войти через Telegram",
-    telegramLoginHint: "Вход привяжет профиль к Telegram ID и откроет подтверждение в Telegram.",
+    telegramLoginHint: "Вход привяжет профиль к Telegram ID. Если подтверждение не приходит, открой бота кнопкой ниже.",
+    telegramBotLogin: "Открыть бота для входа",
+    telegramBotLoginPending: "Открыл ссылку в Telegram. Нажми Start в боте, сайт подключит аккаунт автоматически.",
+    telegramBotLoginExpired: "Ссылка для входа истекла. Открой бота ещё раз.",
     telegramLoggedIn: "Telegram подключён",
     telegramUnavailable: "Telegram Login не настроен",
     telegramAuthFailed: "Не удалось войти через Telegram.",
@@ -182,7 +185,10 @@ const LOCALES = {
     demoWelcome:
       "Ready. Send a task and I will answer with a plan, code, text, table, or checklist.",
     telegramLogin: "Log in with Telegram",
-    telegramLoginHint: "Login links the profile to your Telegram ID and opens a confirmation in Telegram.",
+    telegramLoginHint: "Login links the profile to your Telegram ID. If confirmation does not arrive, open the bot below.",
+    telegramBotLogin: "Open bot to log in",
+    telegramBotLoginPending: "Telegram link opened. Press Start in the bot and the site will connect automatically.",
+    telegramBotLoginExpired: "Login link expired. Open the bot again.",
     telegramLoggedIn: "Telegram connected",
     telegramUnavailable: "Telegram Login is not configured",
     telegramAuthFailed: "Could not log in with Telegram.",
