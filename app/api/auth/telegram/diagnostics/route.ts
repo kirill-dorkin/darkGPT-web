@@ -26,6 +26,11 @@ function tokenBotId(token: string) {
   return /^\d+$/.test(id) ? id : "";
 }
 
+function telegramClientId(botId: string) {
+  const configured = process.env.TELEGRAM_CLIENT_ID || "";
+  return /^\d+$/.test(configured) ? configured : botId;
+}
+
 function check(id: string, label: string, status: CheckStatus, detail: string): DiagnosticCheck {
   return { id, label, status, detail };
 }
@@ -53,6 +58,7 @@ export async function GET(request: Request) {
 
   const botToken = process.env.BOT_TOKEN || "";
   const botId = tokenBotId(botToken);
+  const clientId = telegramClientId(botId);
   const configuredUsername = (process.env.TELEGRAM_BOT_USERNAME || "").replace(/^@/, "");
   const checks: DiagnosticCheck[] = [];
 
@@ -61,13 +67,7 @@ export async function GET(request: Request) {
     callbackUrl.searchParams.set("currentUserId", currentUserId);
   }
 
-  const oauthUrl = new URL("https://oauth.telegram.org/auth");
-  if (botId) {
-    oauthUrl.searchParams.set("bot_id", botId);
-  }
-  oauthUrl.searchParams.set("origin", origin);
-  oauthUrl.searchParams.set("return_to", callbackUrl.toString());
-  oauthUrl.searchParams.set("request_access", "write");
+  const oauthUrl = new URL("https://oauth.telegram.org/js/telegram-login.js?5");
 
   checks.push(
     check(
@@ -77,6 +77,17 @@ export async function GET(request: Request) {
       botToken
         ? text(language, "Токен есть на сервере. Значение наружу не отдаётся.", "The token is present on the server. The value is not exposed.")
         : text(language, "BOT_TOKEN не задан в переменных окружения Vercel.", "BOT_TOKEN is missing from Vercel environment variables."),
+    ),
+  );
+
+  checks.push(
+    check(
+      "client_id",
+      text(language, "Client ID", "Client ID"),
+      clientId ? "ok" : "error",
+      clientId
+        ? text(language, `Telegram Login client_id: ${clientId}.`, `Telegram Login client_id: ${clientId}.`)
+        : text(language, "TELEGRAM_CLIENT_ID не задан и его не удалось собрать из BOT_TOKEN.", "TELEGRAM_CLIENT_ID is missing and could not be derived from BOT_TOKEN."),
     ),
   );
 
@@ -115,10 +126,8 @@ export async function GET(request: Request) {
     check(
       "write_access",
       text(language, "Доступ Telegram", "Telegram access"),
-      oauthUrl.searchParams.get("request_access") === "write" ? "ok" : "warning",
-      oauthUrl.searchParams.has("request_access")
-        ? text(language, "OAuth просит request_access=write: Telegram должен показать подтверждение доступа.", "OAuth requests request_access=write: Telegram should show an access confirmation.")
-        : text(language, "request_access=write не отправляется.", "request_access=write is not sent."),
+      "ok",
+      text(language, "Кнопка вызывает Telegram.Login.auth с request_access=['write'].", "The button calls Telegram.Login.auth with request_access=['write']."),
     ),
   );
 
@@ -174,44 +183,43 @@ export async function GET(request: Request) {
     }
   }
 
-  if (botId) {
+  if (clientId) {
     try {
       const { response, body } = await fetchText(oauthUrl.toString());
-      const host = new URL(origin).host;
-      const pageLoaded = body.includes("Telegram Authorization");
-      const domainVisible = body.includes(host);
-      const invalidDomain = /invalid domain|bot domain invalid/i.test(body);
+      const sdkLoaded = body.includes("Telegram.Login") && body.includes("request_access");
 
       checks.push(
         check(
-          "oauth_page",
-          text(language, "Страница Telegram OAuth", "Telegram OAuth page"),
-          response.ok && pageLoaded && !invalidDomain ? "ok" : "error",
-          response.ok && pageLoaded && !invalidDomain
-            ? text(language, "oauth.telegram.org открывает страницу авторизации.", "oauth.telegram.org opens the authorization page.")
-            : text(language, `Telegram OAuth ответил, но страница не похожа на валидную авторизацию. HTTP ${response.status}.`, `Telegram OAuth responded, but the page does not look like valid authorization. HTTP ${response.status}.`),
+          "login_sdk",
+          text(language, "Telegram Login SDK", "Telegram Login SDK"),
+          response.ok && sdkLoaded ? "ok" : "error",
+          response.ok && sdkLoaded
+            ? text(language, "telegram-login.js загружается.", "telegram-login.js loads successfully.")
+            : text(language, `telegram-login.js не загрузился корректно. HTTP ${response.status}.`, `telegram-login.js did not load correctly. HTTP ${response.status}.`),
         ),
       );
 
       checks.push(
         check(
-          "domain_accepted",
-          text(language, "/setdomain", "/setdomain"),
-          domainVisible && !invalidDomain ? "ok" : "error",
-          domainVisible && !invalidDomain
-            ? text(language, `Telegram показывает домен ${host}. Значит /setdomain принят.`, `Telegram shows ${host}. That means /setdomain is accepted.`)
-            : text(language, `Telegram не показал домен ${host}. Проверь /setdomain у @BotFather.`, `Telegram did not show ${host}. Check /setdomain in @BotFather.`),
+          "web_login_allowed_urls",
+          text(language, "BotFather Web Login", "BotFather Web Login"),
+          "warning",
+          text(
+            language,
+            "Это нельзя проверить сервером. В @BotFather > Bot Settings > Web Login должны быть Allowed URLs: https://dark-gpt-web.vercel.app и https://dark-gpt-web.vercel.app/api/auth/telegram/oidc.",
+            "This cannot be checked server-side. In @BotFather > Bot Settings > Web Login, Allowed URLs must include https://dark-gpt-web.vercel.app and https://dark-gpt-web.vercel.app/api/auth/telegram/oidc.",
+          ),
         ),
       );
     } catch (error) {
       checks.push(
         check(
           "oauth_page",
-          text(language, "Страница Telegram OAuth", "Telegram OAuth page"),
+          text(language, "Telegram Login SDK", "Telegram Login SDK"),
           "error",
           error instanceof Error
-            ? text(language, `Не удалось открыть oauth.telegram.org: ${error.message}.`, `Could not open oauth.telegram.org: ${error.message}.`)
-            : text(language, "Не удалось открыть oauth.telegram.org.", "Could not open oauth.telegram.org."),
+            ? text(language, `Не удалось загрузить telegram-login.js: ${error.message}.`, `Could not load telegram-login.js: ${error.message}.`)
+            : text(language, "Не удалось загрузить telegram-login.js.", "Could not load telegram-login.js."),
         ),
       );
     }
@@ -227,13 +235,14 @@ export async function GET(request: Request) {
     bot: {
       id: botId || null,
       username: botApiUsername || configuredUsername || null,
+      clientId: clientId || null,
     },
     checks,
     summary: ok
       ? text(
           language,
-          "Конфиг сайта и Telegram выглядит рабочим. Если подтверждение не приходит, callback ещё не дошёл до сайта: сбой происходит внутри Telegram OAuth до возврата на сайт.",
-          "The site and Telegram config look valid. If the confirmation does not arrive, the callback has not reached the site yet: the failure is inside Telegram OAuth before returning to the site.",
+          "Кнопка использует новый Telegram Login SDK. Если подтверждение всё равно не приходит, проверь BotFather Web Login Allowed URLs.",
+          "The button uses the new Telegram Login SDK. If the confirmation still does not arrive, check BotFather Web Login Allowed URLs.",
         )
       : text(language, "Есть ошибка в конфигурации Telegram Login. Смотри красную проверку ниже.", "There is a Telegram Login configuration error. See the red check below."),
   };

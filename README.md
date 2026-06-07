@@ -25,11 +25,17 @@ Open `http://localhost:3000`.
 
 ## Telegram Login
 
-Telegram Login uses Telegram's official OAuth redirect flow. `BOT_TOKEN` stays server-side and verifies Telegram's signed auth payload; the public app config exposes only the numeric bot id derived from that token.
+Telegram Login uses the current Telegram Login JS SDK (`telegram-login.js`) with `request_access=['write']`. `BOT_TOKEN` stays server-side for legacy signed payload verification; the new SDK returns an OIDC `id_token`, which the web backend verifies against Telegram JWKS.
+
+In @BotFather, open Bot Settings > Web Login and add the allowed URLs:
+
+- `https://dark-gpt-web.vercel.app`
+- `https://dark-gpt-web.vercel.app/api/auth/telegram/oidc`
 
 ```env
 BOT_TOKEN=...
 TELEGRAM_BOT_USERNAME=dark2_gpt_bot
+TELEGRAM_CLIENT_ID=...
 ```
 
 ## Gemini Env

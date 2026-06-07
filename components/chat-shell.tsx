@@ -54,6 +54,7 @@ type AppConfig = {
   supportUsername: string;
   telegramBotUsername: string;
   telegramBotId: string;
+  telegramClientId: string;
   modelTiers: Array<{
     tier: ModelTier;
     provider: string;
@@ -101,6 +102,16 @@ type InvoiceResponse = ApiEnvelope & {
   balance?: number;
 };
 
+type TelegramOidcResponse = ApiEnvelope & {
+  telegram?: {
+    id: string;
+    username: string | null;
+    name: string | null;
+    picture: string | null;
+    phoneNumber: string | null;
+  };
+};
+
 type PaymentState = {
   packageKey: string;
   price: number;
@@ -130,6 +141,7 @@ type TelegramDiagnostics = {
   bot: {
     id: string | null;
     username: string | null;
+    clientId?: string | null;
   };
   checks: Array<{
     id: string;
@@ -140,8 +152,30 @@ type TelegramDiagnostics = {
   summary: string;
 };
 
+type TelegramLoginPayload = {
+  id_token?: string;
+  user?: unknown;
+  error?: string;
+};
+
+type TelegramLoginSdk = {
+  Login?: {
+    auth: (
+      options: { client_id: number; request_access?: string[]; lang?: string },
+      callback: (data: TelegramLoginPayload) => void,
+    ) => void;
+  };
+};
+
+declare global {
+  interface Window {
+    Telegram?: TelegramLoginSdk;
+  }
+}
+
 const STORAGE_KEY = "darkgpt_web_user_id";
 const TELEGRAM_ATTEMPT_KEY = "darkgpt_telegram_login_attempt";
+const TELEGRAM_LOGIN_SCRIPT = "https://oauth.telegram.org/js/telegram-login.js?5";
 
 const sectionIcons = {
   chat: MessageSquare,
@@ -265,6 +299,29 @@ function telegramErrorReason(language: Language, code?: string) {
   return loc.telegramErrorUnknown;
 }
 
+function loadTelegramLoginScript() {
+  return new Promise<void>((resolve, reject) => {
+    if (window.Telegram?.Login?.auth) {
+      resolve();
+      return;
+    }
+
+    const existing = document.querySelector<HTMLScriptElement>(`script[src="${TELEGRAM_LOGIN_SCRIPT}"]`);
+    if (existing) {
+      existing.addEventListener("load", () => resolve(), { once: true });
+      existing.addEventListener("error", () => reject(new Error("Telegram Login script failed to load")), { once: true });
+      return;
+    }
+
+    const script = document.createElement("script");
+    script.src = TELEGRAM_LOGIN_SCRIPT;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Telegram Login script failed to load"));
+    document.head.appendChild(script);
+  });
+}
+
 export default function ChatShell() {
   const [user, setUser] = useState<PublicUser | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -373,6 +430,10 @@ export default function ChatShell() {
       cancelled = true;
     };
   }, [applyEnvelope]);
+
+  useEffect(() => {
+    void loadTelegramLoginScript().catch(() => undefined);
+  }, []);
 
   const updateUserFromEnvelope = useCallback((data: ApiEnvelope) => {
     applyEnvelope(data);
@@ -533,6 +594,39 @@ export default function ChatShell() {
     }
   }
 
+  async function handleTelegramOidcAuth(data: TelegramLoginPayload, currentUserId: string) {
+    if (data.error) {
+      setNotice(`${loc.telegramAuthFailed} ${data.error}`);
+      return;
+    }
+    if (!data.id_token) {
+      setNotice(`${loc.telegramAuthFailed} ${loc.telegramErrorPayload}`);
+      return;
+    }
+
+    setIsLoading(true);
+    setNotice("");
+    try {
+      const response = await postJson<TelegramOidcResponse>("/api/auth/telegram/oidc", {
+        idToken: data.id_token,
+        currentUserId,
+      });
+      updateUserFromEnvelope(response);
+      if (response.user?.userId) {
+        window.localStorage.setItem(STORAGE_KEY, response.user.userId);
+      }
+      clearTelegramLoginAttempt();
+      setTelegramAttempt(null);
+      const nextLanguage = response.user?.language || language;
+      setNotice(t(nextLanguage, "telegramLoggedIn"));
+      setActiveSection(response.user?.languageSelected ? "profile" : "language");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : loc.telegramAuthFailed);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   async function copyText(text: string, label: string) {
     await navigator.clipboard.writeText(text);
     setCopied(label);
@@ -653,11 +747,11 @@ export default function ChatShell() {
           <div className="mt-5 border-t border-line pt-5">
             <p className="mb-3 text-sm text-slate-600">{loc.telegramLoginHint}</p>
             <TelegramLoginButton
-              botId={config?.telegramBotId || ""}
-              origin={origin}
+              clientId={config?.telegramClientId || config?.telegramBotId || ""}
               currentUserId={user?.userId || ""}
               language={language}
               onAttempt={handleTelegramAttempt}
+              onAuth={(data, currentUserId) => void handleTelegramOidcAuth(data, currentUserId)}
             />
             <TelegramDiagnosticsPanel
               language={language}
@@ -831,13 +925,13 @@ export default function ChatShell() {
             <ProfileView
               user={user}
               language={language}
-              telegramBotId={config?.telegramBotId || ""}
-              origin={origin}
+              telegramClientId={config?.telegramClientId || config?.telegramBotId || ""}
               telegramAttempt={telegramAttempt}
               telegramDiagnostics={telegramDiagnostics}
               isCheckingTelegram={isCheckingTelegram}
               onTelegramAttempt={handleTelegramAttempt}
               onCheckTelegram={() => void checkTelegramDiagnostics()}
+              onTelegramAuth={(data, currentUserId) => void handleTelegramOidcAuth(data, currentUserId)}
             />
           ) : null}
 
@@ -879,20 +973,20 @@ function Metric({ label, value, icon }: { label: string; value: string; icon?: R
 }
 
 function TelegramLoginButton({
-  botId,
-  origin,
+  clientId,
   currentUserId,
   language,
   onAttempt,
+  onAuth,
 }: {
-  botId: string;
-  origin: string;
+  clientId: string;
   currentUserId: string;
   language: Language;
   onAttempt: (attempt: TelegramLoginAttempt) => void;
+  onAuth: (data: TelegramLoginPayload, currentUserId: string) => void;
 }) {
   const loc = locale(language);
-  if (!botId || !origin) {
+  if (!clientId || !/^\d+$/.test(clientId)) {
     return (
       <div className="rounded-md border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
         {loc.telegramUnavailable}
@@ -900,35 +994,40 @@ function TelegramLoginButton({
     );
   }
 
-  const returnTo = new URL("/api/auth/telegram/callback", origin);
-  if (currentUserId) {
-    returnTo.searchParams.set("currentUserId", currentUserId);
+  async function openTelegramLogin() {
+    onAttempt({
+      at: Date.now(),
+      userId: currentUserId,
+      origin: window.location.origin,
+      botId: clientId,
+      callbackUrl: "/api/auth/telegram/oidc",
+      status: "opened",
+    });
+
+    try {
+      await loadTelegramLoginScript();
+      window.Telegram?.Login?.auth(
+        {
+          client_id: Number(clientId),
+          request_access: ["write"],
+          lang: language,
+        },
+        (data) => onAuth(data, currentUserId),
+      );
+    } catch (error) {
+      onAuth({ error: error instanceof Error ? error.message : "Telegram Login script failed to load" }, currentUserId);
+    }
   }
 
-  const telegramUrl = new URL("https://oauth.telegram.org/auth");
-  telegramUrl.searchParams.set("bot_id", botId);
-  telegramUrl.searchParams.set("origin", origin);
-  telegramUrl.searchParams.set("return_to", returnTo.toString());
-  telegramUrl.searchParams.set("request_access", "write");
-
   return (
-    <a
-      href={telegramUrl.toString()}
-      onClick={() =>
-        onAttempt({
-          at: Date.now(),
-          userId: currentUserId,
-          origin,
-          botId,
-          callbackUrl: returnTo.toString(),
-          status: "opened",
-        })
-      }
+    <button
+      type="button"
+      onClick={() => void openTelegramLogin()}
       className="flex h-11 w-full items-center justify-center gap-2 rounded-md bg-ink px-4 text-sm font-semibold text-white transition hover:bg-slate-800"
     >
       <Send size={17} />
       {loc.telegramLogin}
-    </a>
+    </button>
   );
 }
 
@@ -1012,15 +1111,6 @@ function TelegramDiagnosticsPanel({
             </div>
           ))}
           <div className="rounded-md border border-line bg-white px-3 py-2 text-slate-700">{diagnostics.summary}</div>
-          <a
-            href={diagnostics.oauthUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="inline-flex h-9 items-center justify-center gap-2 rounded-md border border-line bg-white px-3 text-sm font-semibold text-slate-800 transition hover:border-signal"
-          >
-            <Send size={15} />
-            {loc.telegramOpenOAuth}
-          </a>
         </div>
       ) : null}
     </div>
@@ -1399,23 +1489,23 @@ function ReferralView({
 function ProfileView({
   user,
   language,
-  telegramBotId,
-  origin,
+  telegramClientId,
   telegramAttempt,
   telegramDiagnostics,
   isCheckingTelegram,
   onTelegramAttempt,
   onCheckTelegram,
+  onTelegramAuth,
 }: {
   user: PublicUser;
   language: Language;
-  telegramBotId: string;
-  origin: string;
+  telegramClientId: string;
   telegramAttempt: TelegramLoginAttempt | null;
   telegramDiagnostics: TelegramDiagnostics | null;
   isCheckingTelegram: boolean;
   onTelegramAttempt: (attempt: TelegramLoginAttempt) => void;
   onCheckTelegram: () => void;
+  onTelegramAuth: (data: TelegramLoginPayload, currentUserId: string) => void;
 }) {
   const loc = locale(language);
   const langName = language === "ru" ? loc.russian : loc.english;
@@ -1442,11 +1532,11 @@ function ProfileView({
           </div>
           <p className="mb-3 text-sm text-slate-700">{loc.telegramLoginHint}</p>
           <TelegramLoginButton
-            botId={telegramBotId}
-            origin={origin}
+            clientId={telegramClientId}
             currentUserId={user.userId}
             language={language}
             onAttempt={onTelegramAttempt}
+            onAuth={onTelegramAuth}
           />
           <TelegramDiagnosticsPanel
             language={language}

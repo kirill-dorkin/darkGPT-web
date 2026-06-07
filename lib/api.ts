@@ -49,6 +49,11 @@ function telegramBotId() {
   return /^\d+$/.test(id) ? id : "";
 }
 
+function telegramClientId() {
+  const configured = process.env.TELEGRAM_CLIENT_ID || "";
+  return /^\d+$/.test(configured) ? configured : telegramBotId();
+}
+
 export function appConfig(origin?: string) {
   return {
     freeTotal: FREE_REQUESTS_PER_DAY,
@@ -57,6 +62,7 @@ export function appConfig(origin?: string) {
     supportUsername: SUPPORT_USERNAME,
     telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || "dark2_gpt_bot",
     telegramBotId: telegramBotId(),
+    telegramClientId: telegramClientId(),
     modelTiers: getPublicModelTiers(),
     origin,
   };
