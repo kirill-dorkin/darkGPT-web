@@ -768,7 +768,6 @@ function TelegramLoginButton({
   telegramUrl.searchParams.set("bot_id", botId);
   telegramUrl.searchParams.set("origin", origin);
   telegramUrl.searchParams.set("return_to", returnTo.toString());
-  telegramUrl.searchParams.set("request_access", "write");
 
   return (
     <a
