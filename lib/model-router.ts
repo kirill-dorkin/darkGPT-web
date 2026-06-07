@@ -40,7 +40,12 @@ function intEnvForTier(prefix: string, tier: ModelTier, fallback: number) {
 
 function defaultModelForProvider(provider: string, tier: ModelTier) {
   if (provider === "gemini") {
-    return env("GEMINI_MODEL", "gemini-2.5-flash-lite");
+    const defaults: Record<ModelTier, string> = {
+      lite: "gemini-2.5-flash-lite",
+      standard: "gemini-2.5-flash",
+      reasoning: "gemini-2.5-pro",
+    };
+    return env("GEMINI_MODEL", defaults[tier]);
   }
   if (provider === "openrouter") {
     return env("OPENROUTER_MODEL") || env("LLM_MODEL", "openrouter/free");

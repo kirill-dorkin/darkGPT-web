@@ -49,7 +49,7 @@ export function appConfig(origin?: string) {
     requestCost: REQUEST_COST,
     packages: PACKAGES,
     supportUsername: SUPPORT_USERNAME,
-    telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || "",
+    telegramBotUsername: process.env.TELEGRAM_BOT_USERNAME || "dark2_gpt_bot",
     modelTiers: getPublicModelTiers(),
     origin,
   };

@@ -100,7 +100,7 @@ function apiKeyForProvider(provider: string) {
 function getProviderConfig(tier?: string | null): ProviderConfig {
   const profile = getModelProfile(tier);
   const provider = profile.provider.toLowerCase();
-  const fallbackModels = (
+  const configuredFallbackModels = (
     env(`AI_${profile.tier.toUpperCase()}_FALLBACK_MODELS`) ||
     env("GEMINI_FALLBACK_MODELS") ||
     env("LLM_FALLBACK_MODELS") ||
@@ -109,6 +109,9 @@ function getProviderConfig(tier?: string | null): ProviderConfig {
     .split(",")
     .map((value) => value.trim())
     .filter((value) => value && value !== profile.model);
+  const fallbackModels = configuredFallbackModels.length
+    ? configuredFallbackModels
+    : defaultFallbackModels(provider, profile.tier, profile.model);
 
   return {
     provider,
@@ -125,6 +128,20 @@ function getProviderConfig(tier?: string | null): ProviderConfig {
     runpodEndpointId: profile.runpodEndpointId,
     replicateVersion: profile.replicateVersion,
   };
+}
+
+function defaultFallbackModels(provider: string, tier: string, model: string) {
+  if (provider !== "gemini") {
+    return [];
+  }
+
+  const defaults: Record<string, string[]> = {
+    lite: ["gemini-2.5-flash", "gemini-2.5-pro"],
+    standard: ["gemini-2.5-flash-lite", "gemini-2.5-pro"],
+    reasoning: ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
+  };
+
+  return (defaults[tier] || defaults.standard).filter((fallbackModel) => fallbackModel !== model);
 }
 
 function extractText(value: unknown): string {
