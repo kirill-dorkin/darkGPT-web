@@ -1,7 +1,7 @@
 import { REQUEST_COST } from "@/lib/constants";
 
 export const MODEL_TIERS = ["lite", "standard", "reasoning"] as const;
-export const REMOTE_PROVIDERS = new Set(["gemini", "openrouter", "runpod", "replicate"]);
+export const REMOTE_PROVIDERS = new Set(["gemini", "openrouter", "nanogpt", "runpod", "replicate"]);
 
 export type ModelTier = (typeof MODEL_TIERS)[number];
 
@@ -49,6 +49,14 @@ function defaultModelForProvider(provider: string, tier: ModelTier) {
   }
   if (provider === "openrouter") {
     return env("OPENROUTER_MODEL") || env("LLM_MODEL", "openrouter/free");
+  }
+  if (provider === "nanogpt") {
+    const defaults: Record<ModelTier, string> = {
+      lite: "openai/TEE/gemma-4-26b-a4b-uncensored",
+      standard: "openai/TEE/gemma-4-26b-a4b-uncensored",
+      reasoning: "openai/TEE/qwen3.6-35b-a3b-uncensored",
+    };
+    return env("NANOGPT_MODEL") || env("LLM_MODEL", defaults[tier]);
   }
   return tier;
 }

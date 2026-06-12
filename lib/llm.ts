@@ -77,6 +77,9 @@ function openAiBaseUrlForProvider(provider: string, runpodEndpointId: string) {
   if (provider === "openrouter") {
     return env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1");
   }
+  if (provider === "nanogpt") {
+    return env("NANOGPT_BASE_URL", "https://nano-gpt.com/api/v1");
+  }
   if (provider === "runpod") {
     return (
       env("RUNPOD_OPENAI_BASE_URL") ||
@@ -93,6 +96,9 @@ function apiKeyForProvider(provider: string) {
   if (provider === "openrouter") {
     return env("OPENROUTER_API_KEY");
   }
+  if (provider === "nanogpt") {
+    return env("NANOGPT_API_KEY");
+  }
   if (provider === "runpod") {
     return env("RUNPOD_API_KEY");
   }
@@ -107,9 +113,13 @@ function getProviderConfig(tier?: string | null): ProviderConfig {
   const provider = profile.provider.toLowerCase();
   const configuredFallbackModels = (
     env(`AI_${profile.tier.toUpperCase()}_FALLBACK_MODELS`) ||
-    env("GEMINI_FALLBACK_MODELS") ||
-    env("LLM_FALLBACK_MODELS") ||
-    env("OPENROUTER_FALLBACK_MODELS")
+    (provider === "gemini"
+      ? env("GEMINI_FALLBACK_MODELS")
+      : provider === "openrouter"
+        ? env("OPENROUTER_FALLBACK_MODELS") || env("LLM_FALLBACK_MODELS")
+        : provider === "nanogpt"
+          ? env("NANOGPT_FALLBACK_MODELS") || env("LLM_FALLBACK_MODELS")
+          : env("LLM_FALLBACK_MODELS"))
   )
     .split(",")
     .map((value) => value.trim())
@@ -169,6 +179,14 @@ function defaultModelForProvider(provider: string, tier: string) {
   if (provider === "openrouter") {
     return env("OPENROUTER_MODEL") || env("LLM_MODEL", "openai/gpt-oss-120b:free");
   }
+  if (provider === "nanogpt") {
+    const defaults: Record<string, string> = {
+      lite: "openai/TEE/gemma-4-26b-a4b-uncensored",
+      standard: "openai/TEE/gemma-4-26b-a4b-uncensored",
+      reasoning: "openai/TEE/qwen3.6-35b-a3b-uncensored",
+    };
+    return env("NANOGPT_MODEL") || env("LLM_MODEL", defaults[tier] || defaults.standard);
+  }
   if (provider === "runpod") {
     return env(`AI_${tier.toUpperCase()}_MODEL`) || env("RUNPOD_MODEL", tier);
   }
@@ -184,6 +202,8 @@ function fallbackModelsForProvider(provider: string, tier: string, model: string
       ? env(`AI_${tier.toUpperCase()}_FALLBACK_MODELS`) || env("GEMINI_FALLBACK_MODELS")
       : provider === "openrouter"
         ? env("OPENROUTER_FALLBACK_MODELS") || env("LLM_FALLBACK_MODELS")
+        : provider === "nanogpt"
+          ? env("NANOGPT_FALLBACK_MODELS") || env("LLM_FALLBACK_MODELS")
         : "";
 
   const models = configured
@@ -191,7 +211,7 @@ function fallbackModelsForProvider(provider: string, tier: string, model: string
     .map((value) => value.trim())
     .filter((value) => value && value !== model);
 
-  if (models.length || provider !== "gemini") {
+  if (models.length || (provider !== "gemini" && provider !== "nanogpt")) {
     return models;
   }
 
@@ -225,6 +245,14 @@ function attemptsForConfig(config: ProviderConfig): ProviderAttempt[] {
 }
 
 function defaultFallbackModels(provider: string, tier: string, model: string) {
+  if (provider === "nanogpt") {
+    const defaults: Record<string, string[]> = {
+      lite: ["openai/TEE/qwen3.6-35b-a3b-uncensored"],
+      standard: ["openai/TEE/qwen3.6-35b-a3b-uncensored"],
+      reasoning: ["openai/TEE/gemma-4-26b-a4b-uncensored"],
+    };
+    return (defaults[tier] || defaults.standard).filter((fallbackModel) => fallbackModel !== model);
+  }
   if (provider !== "gemini") {
     return [];
   }
@@ -297,7 +325,7 @@ function demoResponse(userMessage: string) {
     "",
     userMessage,
     "",
-    "Configure AI_PROVIDER=gemini, AI_PROVIDER=openrouter, AI_PROVIDER=runpod, or AI_PROVIDER=replicate to use remote inference.",
+    "Configure AI_PROVIDER=gemini, AI_PROVIDER=openrouter, AI_PROVIDER=nanogpt, AI_PROVIDER=runpod, or AI_PROVIDER=replicate to use remote inference.",
   ].join("\n");
 }
 

@@ -67,6 +67,20 @@ LLM_FALLBACK_MODELS=
 OPENROUTER_TITLE=DarkGPT Web
 ```
 
+## NanoGPT
+
+NanoGPT uses the same OpenAI-compatible flow. Use the exact model IDs from the model pages and the documented base URL.
+
+```env
+AI_PROVIDER=nanogpt
+AI_STANDARD_PROVIDER=nanogpt
+AI_STANDARD_MODEL=openai/TEE/gemma-4-26b-a4b-uncensored
+AI_REASONING_PROVIDER=nanogpt
+AI_REASONING_MODEL=openai/TEE/qwen3.6-35b-a3b-uncensored
+NANOGPT_API_KEY=...
+NANOGPT_BASE_URL=https://nano-gpt.com/api/v1
+```
+
 ## Payments
 
 ```env
